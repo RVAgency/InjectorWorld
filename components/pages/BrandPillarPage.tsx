@@ -3,7 +3,7 @@ import { Header } from '@/components/header/Header'
 import { Footer } from '@/components/footer/Footer'
 import { BrandDirectoryListing } from '@/components/shared/BrandDirectoryListing'
 import { LocationPicker } from '@/components/shared/LocationPicker'
-import { CountPill } from '@/components/shared/CountPill'
+import { LiveCountPill } from '@/components/shared/LiveCountPill'
 import { FaqBlock } from '@/components/faq/FaqBlock'
 import type { BrandPillarData } from '@/lib/brand-queries'
 
@@ -50,7 +50,7 @@ export function BrandPillarPage({ data, schema }: Props) {
 
           {totalClinics > 0 && (
             <div className="mt-5 flex flex-wrap gap-3">
-              <CountPill count={totalClinics} label="clinics" />
+              <LiveCountPill initial={totalClinics} label="clinics" singular="clinic" nearMe />
             </div>
           )}
 

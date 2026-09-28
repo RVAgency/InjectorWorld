@@ -72,6 +72,8 @@ export type DirectoryClinic = {
    * means "unknown", never "zero", so the card must not render 0 miles for it.
    */
   distanceMiles?: number
+  /** In the visitor's own ZIP on a near-me listing (2026-09-28). */
+  inZip?: boolean
 }
 
 export type LocationInfo = {

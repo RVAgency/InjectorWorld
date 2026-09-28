@@ -1,4 +1,5 @@
 'use client'
+import { usePublishListing } from '@/lib/listing-count-store'
 
 import dynamic from 'next/dynamic'
 import { useEffect, useState, useMemo, useRef } from 'react'
@@ -111,6 +112,9 @@ export function DirectoryClinicsView({
       serverTotal &&
       displayedClinics.length < serverTotal,
   )
+  // The page hero's count follows this list (2026-09-28), see
+  // lib/listing-count-store.ts.
+  usePublishListing(serverTotal, fetchPhase === 'replacing')
 
   async function fetchPage(nextPage: number, append: boolean) {
     if (!loadMoreUrl) return

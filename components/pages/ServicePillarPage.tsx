@@ -5,7 +5,7 @@ import { ServiceDirectory } from '@/components/pages/ServiceDirectory'
 import { ZipPromoBanner } from '@/components/shared/ZipPromoBanner'
 import { CostEstimator } from '@/components/shared/CostEstimator'
 import { LocationPicker } from '@/components/shared/LocationPicker'
-import { CountPill } from '@/components/shared/CountPill'
+import { LiveCountPill } from '@/components/shared/LiveCountPill'
 import { FaqBlock } from '@/components/faq/FaqBlock'
 import type { ServicePillarData } from '@/lib/location-queries'
 import type { ActiveBanner } from '@/lib/promotions'
@@ -64,7 +64,7 @@ export function ServicePillarPage({ data, banner, schema }: Props) {
 
           {totalClinics > 0 && (
             <div className="mt-5 flex flex-wrap gap-3">
-              <CountPill count={totalClinics} label="clinics" />
+              <LiveCountPill initial={totalClinics} label="clinics" singular="clinic" nearMe />
             </div>
           )}
 

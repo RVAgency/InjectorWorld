@@ -14,7 +14,9 @@ import { TopResults } from '@/components/search/TopResults'
 import { HeaderSearchBar } from '@/components/header/HeaderSearchBar'
 import { SearchMapSection } from '@/components/search/SearchMapSection'
 import { SearchResultsWithFilters } from '@/components/search/SearchResultsWithFilters'
-import { CountPill } from '@/components/shared/CountPill'
+import { LiveCountPill } from '@/components/shared/LiveCountPill'
+import { headers } from 'next/headers'
+import { visitorZipCentre } from '@/lib/visitor-location'
 
 // Results depend on query params and are not indexable, so render on demand.
 export const dynamic = 'force-dynamic'
@@ -52,9 +54,13 @@ export default async function SearchPage({
   // reveals 12 at a time; past it, Load more fetches the next page from
   // /api/search/more with this same query string. The listing filters are
   // applied in SQL, so the total is the real number of matches.
+  // "near me" is answered from this visitor's ZIP. This page is dynamic and
+  // never cached, so reading the request's location here is safe; it is only
+  // looked up when a query actually says "near me".
+  const requestHeaders = await headers()
   const [result, topResults, filterOptions, stateOptions] = hasQuery
     ? await Promise.all([
-        searchPageResults(request),
+        searchPageResults(request, 1, () => visitorZipCentre(requestHeaders)),
         getTopResults(omniValue),
         getSearchFilterOptions(),
         getLocationFilterOptions(),
@@ -72,6 +78,7 @@ export default async function SearchPage({
       ]
 
   const total = result.clinicTotal
+  const zipNotice = 'zipNotice' in result ? result.zipNotice : undefined
   const treatmentText = result.serviceLabel || treatment
   const brandText = result.brandLabel
   const locationText = result.locationLabel || effectiveLocation
@@ -100,7 +107,7 @@ export default async function SearchPage({
           </h1>
           {hasQuery ? (
             <p className="flex flex-wrap items-center gap-2 text-body-sm text-ink-secondary mb-5">
-              <CountPill count={total} label={total === 1 ? 'result' : 'results'} />
+              <LiveCountPill initial={total} label="results" singular="result" />
               <span>across verified clinics.</span>
             </p>
           ) : (
@@ -146,11 +153,20 @@ export default async function SearchPage({
               ) : (
                 <>
                   <p className="flex flex-wrap items-center gap-2 text-ink-secondary text-sm mb-4">
-                    <CountPill count={total} label={total === 1 ? 'result' : 'results'} />
+                    <LiveCountPill initial={total} label="results" singular="result" />
                     {/* Load more reaches SEARCH_RESULT_CAP; only past that is
                         refining the one way to see more. */}
                     {total > SEARCH_RESULT_CAP && <span>Refine your search for more.</span>}
                   </p>
+                  {/* ZIP-centred search (2026-09-28): the ZIP's own clinics
+                      lead. Same wording as the near-me listings' header. */}
+                  {zipNotice && total > 0 && (
+                    <p className="text-body-sm text-ink-secondary mb-4">
+                      {zipNotice.zipCount === 0
+                        ? `No clinics in ${zipNotice.zip}. Showing ${total.toLocaleString()} ${total === 1 ? 'clinic' : 'clinics'} within ${zipNotice.radiusMiles} miles.`
+                        : `${zipNotice.zipCount.toLocaleString()} ${zipNotice.zipCount === 1 ? 'clinic' : 'clinics'} in ${zipNotice.zip}, plus nearby within ${zipNotice.radiusMiles} miles (${total.toLocaleString()} total)`}
+                    </p>
+                  )}
                   {locationText && result.clinics.length > 0 && (
                     <SearchMapSection clinics={result.clinics} />
                   )}

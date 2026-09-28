@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { searchDirectory, DEFAULT_RADIUS_MILES } from '@/lib/search-queries'
+import { searchDirectory } from '@/lib/search-queries'
 import { geocode } from '@/lib/geocode'
 import { RateLimiter, getIp } from '@/lib/rate-limit'
 
@@ -46,7 +46,10 @@ export async function GET(req: NextRequest) {
   const location = (sp.get('location') ?? '').trim()
   const page = num(sp.get('page')) ?? 1
   const limit = Math.min(num(sp.get('limit')) ?? 24, 100) // cap at 100 to prevent full-table pulls
-  const radiusMiles = num(sp.get('radius')) ?? DEFAULT_RADIUS_MILES
+  // Only when the caller asked for one (2026-09-28). Absent, searchDirectory
+  // picks it: 25 miles around a place, or the ZIP-first ladder (3, 10, 25, 50)
+  // around a ZIP, so this live panel counts what the /search page will show.
+  const radiusMiles = num(sp.get('radius'))
 
   // Coordinates: passed directly, or geocoded from the typed location text.
   let lat = num(sp.get('lat'))

@@ -17,6 +17,7 @@ import { useNearMeRadius } from '@/components/shared/useNearMeRadius'
 import { useNearMe } from '@/components/shared/useNearMe'
 import { sortClinicsByDistance, sortClinicsByMeritWithinBuckets } from '@/lib/merit'
 import { fetchListingJson } from '@/lib/near-me-prefetch'
+import { usePublishListing } from '@/lib/listing-count-store'
 import {
   DEFAULT_LISTING_FILTERS,
   applyListingFilters,
@@ -117,9 +118,15 @@ export function ClinicsGrid({
         lat: near.lat,
         lng: near.lng,
         radius: distanceChoice === null ? null : nearRadius.radius,
+        zip: near.zip,
       }),
-    [listingFilters, nearMeEnabled, near.status, near.lat, near.lng, nearRadius.radius, distanceChoice],
+    [listingFilters, nearMeEnabled, near.status, near.lat, near.lng, near.zip, nearRadius.radius, distanceChoice],
   )
+  // How many of the listed clinics are in the visitor's own ZIP (2026-09-28),
+  // from page 1 of the near-me query. Null whenever no ZIP was sent.
+  const [zipCount, setZipCount] = useState<number | null>(null)
+  // States and average rating of the listed set, for the hero (2026-09-28).
+  const [liveStats, setLiveStats] = useState<{ stateCount: number; avgRating: string } | null>(null)
   // Declared here rather than beside the refetch effect below, because the two
   // phase flags under them are read by the grid, the count line and hasMore,
   // all of which come first in this component.
@@ -137,6 +144,10 @@ export function ClinicsGrid({
   const bootPhase = nearMeEnabled && near.status === 'idle'
   const listPending =
     nearMeEnabled && (near.status === 'resolving' || renderedKey !== serverKey)
+  // The /clinics hero (count and stats) follows this list (2026-09-28), see
+  // lib/listing-count-store.ts. Stats stay null until a query has returned
+  // them, and the hero keeps the page's own numbers until then.
+  usePublishListing(currentTotal, bootPhase || listPending || fetchPhase === 'replacing', liveStats)
 
   // Distance band first, merit inside the band (2026-08-15). The server has
   // already ordered the page by band; this settles the order within each one.
@@ -189,11 +200,19 @@ export function ClinicsGrid({
 
       // fetchListingJson: same request, but reuses NearMeBoot's early page-1
       // fetch when it is for this exact URL (lib/near-me-prefetch.ts).
-      const json = await fetchListingJson(`/api/clinics-list?${params.toString()}`) as { clinics?: ClinicListItem[]; totalDocs?: number }
+      const json = await fetchListingJson(`/api/clinics-list?${params.toString()}`) as {
+        clinics?: ClinicListItem[]
+        totalDocs?: number
+        zipCount?: number | null
+        widerRadius?: number | null
+        stats?: { stateCount: number; avgRating: string } | null
+      }
       const nextClinics = Array.isArray(json.clinics) ? json.clinics : []
 
       setAllClinics((prev) => append ? [...prev, ...nextClinics] : nextClinics)
       setCurrentTotal(Number(json.totalDocs ?? nextClinics.length))
+      if (!append) setZipCount(typeof json.zipCount === 'number' ? json.zipCount : null)
+      if (!append) setLiveStats(json.stats ?? null)
       // Nothing inside the current radius: widen one rung rather than printing
       // "No clinics match your filter" at someone who simply lives outside a
       // metro. Only ever fires on the automatic near-me radius, never on a
@@ -206,7 +225,9 @@ export function ClinicsGrid({
         effectiveFilters.radius != null &&
         Number(json.totalDocs ?? 0) === 0
       ) {
-        nearRadius.widen()
+        // Straight to the first rung that has clinics, when the API named one.
+        if ('widerRadius' in json) nearRadius.widenTo(json.widerRadius)
+        else nearRadius.widen()
       }
       setPage(nextPage)
       setInitialLoadFailed(false)
@@ -348,6 +369,7 @@ export function ClinicsGrid({
             total={currentTotal}
             radiusMiles={effectiveFilters.radius}
             ladderExhausted={nearRadius.exhausted}
+            zipCount={zipCount}
           />
         )}
         {listPending && <div className="mb-6 h-8 w-64 rounded-control bg-surface animate-pulse" />}

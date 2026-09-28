@@ -2,7 +2,7 @@ import Link from 'next/link'
 import { Header } from '@/components/header/Header'
 import { Footer } from '@/components/footer/Footer'
 import { BrandDirectoryListing } from '@/components/shared/BrandDirectoryListing'
-import { CountPill } from '@/components/shared/CountPill'
+import { LiveCountPill } from '@/components/shared/LiveCountPill'
 import { FaqBlock } from '@/components/faq/FaqBlock'
 import type { BrandCityData } from '@/lib/brand-queries'
 
@@ -58,7 +58,7 @@ export function BrandCityDirectoryPage({ data, schema }: Props) {
               chips. The page is the pill, the listing and its filters. */}
           {totalClinics > 0 && (
             <div className="mt-5 flex flex-wrap gap-3">
-              <CountPill count={totalClinics} label="clinics" />
+              <LiveCountPill initial={totalClinics} label="clinics" singular="clinic" />
             </div>
           )}
         </div>

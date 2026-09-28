@@ -4,7 +4,7 @@ import { Footer } from '@/components/footer/Footer'
 import { ZipPromoBanner } from '@/components/shared/ZipPromoBanner'
 import { ComingSoonMarket } from '@/components/shared/ComingSoonMarket'
 import { ServiceDirectory } from '@/components/pages/ServiceDirectory'
-import { CountPill } from '@/components/shared/CountPill'
+import { LiveCountPill } from '@/components/shared/LiveCountPill'
 import { LocationPicker } from '@/components/shared/LocationPicker'
 import { FaqBlock } from '@/components/faq/FaqBlock'
 import { isMarketLive } from '@/lib/markets'
@@ -106,7 +106,7 @@ export function ServiceStatePage({ data, banner, schema }: Props) {
               service city page. */}
           {totalClinics > 0 && (
             <div className="mt-5 flex flex-wrap gap-3">
-              <CountPill count={totalClinics} label="clinics" />
+              <LiveCountPill initial={totalClinics} label="clinics" singular="clinic" />
             </div>
           )}
 

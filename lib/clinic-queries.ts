@@ -63,6 +63,8 @@ export type ClinicListItem = {
    * means "unknown", never "zero".
    */
   distanceMiles?: number
+  /** In the visitor's own ZIP on a near-me listing (2026-09-28). */
+  inZip?: boolean
 }
 
 export type ClinicDetail = Omit<ClinicListItem, 'brandsOffered' | 'servicesOffered'> & {

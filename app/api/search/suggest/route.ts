@@ -4,6 +4,14 @@ import { RateLimiter, getIp } from '@/lib/rate-limit'
 import { lookupZip, suggestZips } from '@/lib/zip-lookup'
 import { getLocationSlugMap, lookupSlugs } from '@/lib/location-slug-lookup'
 import type { Suggestion } from '@/lib/search-client'
+import {
+  buildBrandLookup,
+  buildServiceLookup,
+  buildTolerantLookups,
+  compactKey,
+  resolveTolerant,
+  type TolerantLookups,
+} from '@/lib/search-intent'
 
 type SuggestType = 'all' | 'service' | 'location'
 
@@ -31,6 +39,8 @@ type StaticLists = {
   services: { name: string; slug: string; category: string }[]
   brands: { name: string; slug: string }[]
   locations: { label: string; href: string; sublabel: string }[]
+  /** Same spelling-tolerant keys the search itself uses (lib/search-intent.ts). */
+  tolerant: TolerantLookups
 }
 let cache: { at: number; lists: StaticLists } | null = null
 const TTL_MS = 5 * 60 * 1000
@@ -76,7 +86,14 @@ async function getStaticLists(payload: any, pool: any): Promise<StaticLists> {
     /* fall back to states only */
   }
 
-  cache = { at: Date.now(), lists: { services, brands, locations } }
+  const tolerant = buildTolerantLookups({
+    treatmentPhraseToSlug: buildServiceLookup(services),
+    brandPhraseToSlug: buildBrandLookup(brands),
+    serviceSlugs: new Set(services.map((s) => s.slug)),
+    brandSlugs: new Set(brands.map((b) => b.slug)),
+  })
+
+  cache = { at: Date.now(), lists: { services, brands, locations, tolerant } }
   return cache.lists
 }
 
@@ -94,6 +111,22 @@ function startsOrIncludes(haystack: string, q: string): number {
   const h = haystack.toLowerCase()
   if (h.startsWith(q)) return 2
   if (h.includes(q)) return 1
+  return 0
+}
+
+/**
+ * startsOrIncludes, then the same test with spaces and punctuation ignored on
+ * both sides, so "lipfiller" and "lip-filler" find "Lip Filler". The second
+ * test only runs when the first found nothing, so no existing suggestion moves.
+ */
+function nameScore(name: string, q: string): number {
+  const direct = startsOrIncludes(name, q)
+  if (direct > 0) return direct
+  const qc = compactKey(q)
+  if (qc.length < 3) return 0
+  const nc = compactKey(name)
+  if (nc.startsWith(qc)) return 2
+  if (nc.includes(qc)) return 1
   return 0
 }
 
@@ -163,7 +196,7 @@ export async function GET(req: NextRequest) {
     // HeroSearch.tsx / HeaderSearchBar.tsx) -- they used to disagree.
     const services: Suggestion[] = wantService
       ? lists.services
-          .map((t) => ({ t, score: startsOrIncludes(t.name, ql) }))
+          .map((t) => ({ t, score: nameScore(t.name, ql) }))
           .filter((x) => x.score > 0)
           .sort((a, b) => b.score - a.score)
           .slice(0, 4)
@@ -179,7 +212,7 @@ export async function GET(req: NextRequest) {
     // typing a brand name like "Juvederm" got no dedicated suggestion.
     const brands: Suggestion[] = wantService
       ? lists.brands
-          .map((b) => ({ b, score: startsOrIncludes(b.name, ql) }))
+          .map((b) => ({ b, score: nameScore(b.name, ql) }))
           .filter((x) => x.score > 0)
           .sort((a, b) => b.score - a.score)
           .slice(0, 3)
@@ -190,6 +223,19 @@ export async function GET(req: NextRequest) {
             href: `/brands/${x.b.slug}`,
           }))
       : []
+
+    // Nothing by name: try the search's own spelling tolerance on the whole
+    // text, so "lip fillers", "lip filer", "juvaderm" or "microblading" still
+    // offer the right service or brand. Only when the name tests found nothing,
+    // so every suggestion that exists today is unchanged.
+    if (wantService && services.length === 0 && brands.length === 0 && ql.length >= 4) {
+      const svcSlug = resolveTolerant(ql, lists.tolerant, 'treatment')
+      const svc = svcSlug ? lists.services.find((s) => s.slug === svcSlug) : undefined
+      if (svc) services.push({ type: 'service', label: svc.name, sublabel: 'Service', href: `/services/${svc.slug}` })
+      const brandSlug = resolveTolerant(ql, lists.tolerant, 'brand')
+      const brand = brandSlug ? lists.brands.find((b) => b.slug === brandSlug) : undefined
+      if (brand) brands.push({ type: 'brand', label: brand.name, sublabel: 'Brand', href: `/brands/${brand.slug}` })
+    }
 
     // Locations (max 5, only for "where" field)
     const locations: Suggestion[] = wantLocation

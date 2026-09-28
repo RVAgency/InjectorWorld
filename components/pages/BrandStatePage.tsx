@@ -2,7 +2,7 @@ import Link from 'next/link'
 import { Header } from '@/components/header/Header'
 import { Footer } from '@/components/footer/Footer'
 import { BrandDirectoryListing } from '@/components/shared/BrandDirectoryListing'
-import { CountPill } from '@/components/shared/CountPill'
+import { LiveCountPill } from '@/components/shared/LiveCountPill'
 import { LocationPicker } from '@/components/shared/LocationPicker'
 import { FaqBlock } from '@/components/faq/FaqBlock'
 import type { BrandStateData } from '@/lib/brand-queries'
@@ -53,7 +53,7 @@ export function BrandStatePage({ data, schema }: Props) {
               "verified" came out of the pill label with it. */}
           {totalClinics > 0 && (
             <div className="mt-5 flex flex-wrap gap-3">
-              <CountPill count={totalClinics} label="clinics" />
+              <LiveCountPill initial={totalClinics} label="clinics" singular="clinic" />
             </div>
           )}
 

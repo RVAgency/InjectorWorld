@@ -411,3 +411,14 @@ html[data-near-me='pending'] [data-nearme-boot='skeleton'] {
 html[data-near-me='pending'] [data-nearme-boot='list'] {
   display: none;
 }
+/* The hero count pill above a near-me listing (2026-09-28) waits with it: the
+   served HTML carries the page's national number for crawlers, and a visitor
+   whose local list is loading sees the pill pulse instead of that number.
+   Same attribute, so the two always appear together. `pulse` is Tailwind's
+   animate-pulse keyframes. See components/shared/CountPill.tsx. */
+html[data-near-me='pending'] [data-live-count='nearme'] {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+html[data-near-me='pending'] [data-live-count='nearme'] > * {
+  visibility: hidden;
+}

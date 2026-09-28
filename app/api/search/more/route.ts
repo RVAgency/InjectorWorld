@@ -6,6 +6,7 @@ import {
   SEARCH_RESULT_CAP,
 } from '@/lib/search-queries'
 import { RateLimiter, getIp } from '@/lib/rate-limit'
+import { visitorZipCentre } from '@/lib/visitor-location'
 
 export const dynamic = 'force-dynamic'
 
@@ -49,7 +50,8 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const result = await searchPageResults(request, page)
+    // Same request, same visitor: a "near me" page 2 is centred where page 1 was.
+    const result = await searchPageResults(request, page, () => visitorZipCentre(req.headers))
     return NextResponse.json(
       { clinics: result.clinics, clinicTotal: result.clinicTotal, page },
       { headers: NO_STORE },

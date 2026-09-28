@@ -4,7 +4,7 @@ import { Footer } from '@/components/footer/Footer'
 import { DirectoryClinicsView } from '@/components/shared/DirectoryClinicsView'
 import { ZipPromoBanner } from '@/components/shared/ZipPromoBanner'
 import { ComingSoonMarket } from '@/components/shared/ComingSoonMarket'
-import { CountPill } from '@/components/shared/CountPill'
+import { LiveCountPill } from '@/components/shared/LiveCountPill'
 import { FaqBlock } from '@/components/faq/FaqBlock'
 import { isMarketLive } from '@/lib/markets'
 import type { CityDirectoryData } from '@/lib/location-queries'
@@ -200,7 +200,7 @@ export function CityDirectoryPage({ data, banner, schema }: Props) {
               lines under it. */}
           {totalClinics > 0 && (
             <div className="mt-5 flex flex-wrap gap-3">
-              <CountPill count={totalClinics} label="clinics" />
+              <LiveCountPill initial={totalClinics} label="clinics" singular="clinic" />
             </div>
           )}
         </div>

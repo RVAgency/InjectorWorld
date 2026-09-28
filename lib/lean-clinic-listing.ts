@@ -21,7 +21,7 @@ import {
   clinicDistanceMetersHaversine,
   isPostGisAvailable,
 } from './search-sql'
-import { NEAR_BUCKET_MILES } from './merit'
+import { NEAR_BUCKET_MILES, NEAR_ME_RADIUS_LADDER, NEAR_ME_ZIP_REACH_MILES } from './merit'
 import { BoundedTtlCache } from './bounded-ttl-cache'
 
 /**
@@ -33,8 +33,15 @@ import { BoundedTtlCache } from './bounded-ttl-cache'
  * which is why it can be small: every page of one filtered listing shares a key.
  * A stale count only ever mis-states "N remaining" for a few minutes; it cannot
  * hide or duplicate a clinic, because the rows themselves are never cached here.
+ *
+ * `inZip` is the near-me ZIP's share of the total (2026-09-28), null when no
+ * ZIP was passed. It comes from the same query, so it costs nothing extra.
  */
-const countCache = new BoundedTtlCache<number>(300, 5 * 60 * 1000)
+const countCache = new BoundedTtlCache<{
+  total: number
+  inZip: number | null
+  stats: { stateCount: number; avgRating: string } | null
+}>(300, 5 * 60 * 1000)
 
 /**
  * Distance-band ordering for the "near me" default listing (2026-08-15).
@@ -83,6 +90,8 @@ export type LeanClinicRow = {
   distance_miles?: number | null
   /** The 5-mile band this row sorted into. Absent when `near` was not passed. */
   geo_rank?: number
+  /** In the near-me ZIP. Present only when a ZIP was passed with a radius. */
+  in_zip?: boolean
 }
 
 export type LeanListingFilters = {
@@ -101,6 +110,12 @@ export type LeanListingFilters = {
    * at the top of the page, which is the whole point.
    */
   near?: { lat: number; lng: number }
+  /**
+   * The near-me ZIP (2026-09-28). Only honoured together with a radius: its
+   * clinics lead the list and are kept even past the radius. Five digits,
+   * checked in parseLeanListingFilters and again in fetchLeanClinics.
+   */
+  nearZip?: string
 }
 
 /** The clinic_type values the Clinics collection allows. Anything else in the
@@ -145,6 +160,7 @@ export function parseLeanListingFilters(searchParams: URLSearchParams): LeanList
     Number.isFinite(lat) && lat >= -90 && lat <= 90 &&
     Number.isFinite(lng) && lng >= -180 && lng <= 180
   const hasGeo = hasPoint && Number.isFinite(radius) && radius > 0
+  const zip = searchParams.get('zip') ?? ''
 
   return {
     brandIds: idList(searchParams.get('brand')),
@@ -153,6 +169,7 @@ export function parseLeanListingFilters(searchParams: URLSearchParams): LeanList
     minRating: Number.isFinite(rating) && rating > 0 ? rating : undefined,
     ...(hasGeo ? { radiusMiles: radius, lat, lng } : {}),
     ...(hasPoint ? { near: { lat, lng } } : {}),
+    ...(hasGeo && /^\d{5}$/.test(zip) ? { nearZip: zip } : {}),
   }
 }
 
@@ -193,8 +210,34 @@ export async function fetchLeanClinics(
      * result set is identical, only the order changes. See NEAR_BUCKET_MILES.
      */
     near?: { lat: number; lng: number }
+    /**
+     * Near-me ZIP, added 2026-09-28. Honoured only with a radius: clinics in
+     * this ZIP lead the list and are kept even past the radius (up to
+     * NEAR_ME_ZIP_REACH_MILES from the point).
+     */
+    nearZip?: string
+    /**
+     * Also return the /clinics hero stats for the matched set (2026-09-28):
+     * distinct states and average rating, from the same count query and with
+     * the same formula as getClinicsStats in lib/clinic-queries.ts.
+     */
+    withStats?: boolean
   },
-): Promise<{ rows: LeanClinicRow[]; totalCount: number }> {
+): Promise<{
+  rows: LeanClinicRow[]
+  totalCount: number
+  /** How many of totalCount are in nearZip. Null when no ZIP applied. */
+  zipCount: number | null
+  /** Hero stats for the matched set, only when withStats was asked for. */
+  stats?: { stateCount: number; avgRating: string } | null
+  /**
+   * Set only when a radius query matched nothing: the first wider rung of
+   * NEAR_ME_RADIUS_LADDER that does have clinics, or null when none of them
+   * does. Lets the near-me listing jump straight to it instead of paying one
+   * request per empty rung. Undefined when the query was not empty.
+   */
+  widerRadius?: number | null
+}> {
   const conditions: string[] = [`c.status = 'published'`]
   const params: unknown[] = []
 
@@ -237,6 +280,14 @@ export async function fetchLeanClinics(
     params.push(opts.minRating)
     conditions.push(`c.aggregate_rating >= $${params.length}`)
   }
+  // Everything above is the query WITHOUT its radius. Kept so an empty radius
+  // result can ask which wider rung has clinics (see widerRadius below).
+  const baseConditionCount = conditions.length
+  const baseParamCount = params.length
+  // Bind placeholder of the near-me ZIP, when one applies.
+  let zipRef: string | null = null
+  let radiusDistExpr: string | null = null
+
   if (opts.radiusMiles != null && opts.lat != null && opts.lng != null) {
     // Box first (indexed columns), exact circle second. The lat/lng/radius
     // values are interpolated as numeric literals, never bind params, which is
@@ -247,8 +298,22 @@ export async function fetchLeanClinics(
     const distExpr = geoEnabled
       ? clinicDistanceMeters(opts.lat, opts.lng, 'c')
       : clinicDistanceMetersHaversine(opts.lat, opts.lng, 'c')
-    conditions.push(clinicBoundingBoxSql(opts.lat, opts.lng, opts.radiusMiles, 'c'))
-    conditions.push(`${distExpr} <= ${meters}`)
+    radiusDistExpr = distExpr
+    const box = clinicBoundingBoxSql(opts.lat, opts.lng, opts.radiusMiles, 'c')
+    if (opts.nearZip && /^\d{5}$/.test(opts.nearZip)) {
+      // Near-me (2026-09-28): the radius OR the visitor's own ZIP. The ZIP
+      // half sits inside its own box so both halves stay on the latitude
+      // index; "OR c.zip = $n" alone scanned the whole table (1.3 to 1.9 s
+      // against 9 to 29 ms, staging). See NEAR_ME_ZIP_REACH_MILES.
+      params.push(opts.nearZip)
+      zipRef = `$${params.length}`
+      const zipBox = clinicBoundingBoxSql(opts.lat, opts.lng, NEAR_ME_ZIP_REACH_MILES, 'c')
+      conditions.push(`((${box} AND ${distExpr} <= ${meters}) OR (${zipBox} AND c.zip = ${zipRef}))`)
+    } else {
+      // Unchanged, clause for clause, when no ZIP is involved.
+      conditions.push(box)
+      conditions.push(`${distExpr} <= ${meters}`)
+    }
   }
 
   // Distance-band ordering (see NEAR_BUCKET_MILES). The bounding-box test is
@@ -298,6 +363,16 @@ export async function fetchLeanClinics(
       geoOrder = 'geo_rank ASC, '
       geoOrderOuter = 'm.geo_rank ASC, '
     }
+  }
+
+  // The visitor's own ZIP ahead of everything else (2026-09-28), then the
+  // radius nearest first. sortClinicsByDistance in lib/merit.ts applies the
+  // same order to the rows the browser has loaded, so the two cannot disagree.
+  if (zipRef) {
+    geoSelect += `,
+             (c.zip = ${zipRef}) AS in_zip`
+    geoOrder = `in_zip DESC, ${geoOrder}`
+    geoOrderOuter = `m.in_zip DESC, ${geoOrderOuter}`
   }
 
   const where = conditions.join(' AND ')
@@ -375,20 +450,63 @@ export async function fetchLeanClinics(
   // The key is the WHERE clause plus its parameters, so any change of filter,
   // state or city is a different key and still gets an exact number.
   const countParams = params.slice(0, params.length - 2)
-  const countKey = `${where}|${JSON.stringify(countParams)}`
-  const cachedCount = countCache.get(countKey)
-  if (cachedCount !== undefined) {
-    return { rows: res.rows, totalCount: cachedCount }
+  const countKey = `${where}|${JSON.stringify(countParams)}|${opts.withStats ? 'stats' : ''}`
+  let counts = countCache.get(countKey)
+  if (counts === undefined) {
+    const countRes = await pool.query(
+      `SELECT count(*)::int AS n${zipRef ? `, count(*) FILTER (WHERE c.zip = ${zipRef})::int AS z` : ''}${
+        opts.withStats
+          ? `, count(DISTINCT c.state)::int AS states, ROUND(AVG(c.aggregate_rating)::numeric, 1) AS avg_rating`
+          : ''
+      }
+         FROM clinics c WHERE ${where}`,
+      countParams,
+    )
+    const row = countRes.rows[0] ?? {}
+    counts = {
+      total: row.n ?? 0,
+      inZip: zipRef ? (row.z ?? 0) : null,
+      stats: opts.withStats
+        ? { stateCount: Number(row.states) || 0, avgRating: row.avg_rating ? String(row.avg_rating) : '0.0' }
+        : null,
+    }
+    countCache.set(countKey, counts)
   }
 
-  const countRes = await pool.query(
-    `SELECT count(*)::int AS n FROM clinics c WHERE ${where}`,
-    countParams,
-  )
-  const totalCount = countRes.rows[0]?.n ?? 0
-  countCache.set(countKey, totalCount)
+  // An empty radius: which wider rung has clinics? One grouped count instead of
+  // one full listing request per empty rung (2026-09-28). The ZIP half of the
+  // filter is left out on purpose: it matched nothing, or the total would not
+  // be zero.
+  let widerRadius: number | null | undefined
+  if (counts.total === 0 && radiusDistExpr && opts.radiusMiles != null && opts.lat != null && opts.lng != null) {
+    const rungs = NEAR_ME_RADIUS_LADDER.filter((r) => r > (opts.radiusMiles as number))
+    widerRadius = null
+    if (rungs.length > 0) {
+      const outer = rungs[rungs.length - 1]
+      const baseWhere = [
+        ...conditions.slice(0, baseConditionCount),
+        clinicBoundingBoxSql(opts.lat, opts.lng, outer, 'c'),
+      ].join(' AND ')
+      const rungRes = await pool.query(
+        `SELECT ${rungs
+          .map((r, i) => `count(*) FILTER (WHERE ${radiusDistExpr} <= ${r * METERS_PER_MILE})::int AS r${i}`)
+          .join(', ')}
+           FROM clinics c WHERE ${baseWhere}`,
+        params.slice(0, baseParamCount),
+      )
+      const row = rungRes.rows[0] ?? {}
+      const hit = rungs.findIndex((_, i) => Number(row[`r${i}`] ?? 0) > 0)
+      widerRadius = hit >= 0 ? rungs[hit] : null
+    }
+  }
 
-  return { rows: res.rows, totalCount }
+  return {
+    rows: res.rows,
+    totalCount: counts.total,
+    zipCount: counts.inZip,
+    ...(opts.withStats ? { stats: counts.stats } : {}),
+    ...(widerRadius !== undefined ? { widerRadius } : {}),
+  }
 }
 
 /**
@@ -440,6 +558,8 @@ export function leanRowToListingJson(
     brandsOffered: (row.brands_offered ?? []).map((b) => String(b)),
     servicesOffered: (row.services_offered ?? []).map((s) => String(s)),
     distanceMiles: num(row.distance_miles) ?? undefined,
+    // Only near-me rows carry it; absent everywhere else.
+    inZip: row.in_zip === true ? true : undefined,
   }
 }
 

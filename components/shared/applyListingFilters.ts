@@ -13,6 +13,13 @@ export type ListingFilterValues = {
   services: string[]
   lat: number | null
   lng: number | null
+  /**
+   * The visitor's ZIP, set ONLY by withNearMeDefault for the automatic near-me
+   * radius (2026-09-28). Its clinics lead the list and stay in it even past the
+   * radius. Never read from or written to the url: the ZIP stays out of the
+   * address bar (docs/ZIP-NEAR-ME-LISTING-2026-09-10.md hard rule 3).
+   */
+  nearZip?: string | null
 }
 
 export type ScoredListingResult<T> = {
@@ -135,7 +142,10 @@ export function applyListingFilters<T>(
       const root = asRecord(item)
 
       if (filters.radius != null && filters.lat != null && filters.lng != null) {
-        if (distanceMiles == null || distanceMiles > filters.radius) return false
+        // A clinic in the visitor's own ZIP stays even past the radius: the
+        // server included it on purpose (it leads the near-me list).
+        const keptForZip = Boolean(filters.nearZip) && root.inZip === true
+        if (!keptForZip && (distanceMiles == null || distanceMiles > filters.radius)) return false
       }
 
       if (filters.rating != null && (asNumber(root.aggregateRating) ?? 0) < filters.rating) return false
@@ -188,6 +198,8 @@ export function withNearMeDefault(
     lng: number | null
     /** Current rung of NEAR_ME_RADIUS_LADDER, or null once it is exhausted. */
     radius: number | null
+    /** The visitor's ZIP. Its clinics lead the automatic near-me list. */
+    zip?: string | null
   },
 ): ListingFilterValues {
   if (!near.enabled || !near.ready) return filters
@@ -197,7 +209,7 @@ export function withNearMeDefault(
   // national list still opens with their own area, but stop filtering by a
   // radius that matched nothing.
   if (near.radius == null) return { ...filters, lat: near.lat, lng: near.lng }
-  return { ...filters, lat: near.lat, lng: near.lng, radius: near.radius }
+  return { ...filters, lat: near.lat, lng: near.lng, radius: near.radius, nearZip: near.zip ?? null }
 }
 
 /**
@@ -230,7 +242,13 @@ export function toServerFilterParams(filters: ListingFilterValues): URLSearchPar
   if (filters.lat != null && filters.lng != null) {
     params.set('lat', roundForCache(filters.lat))
     params.set('lng', roundForCache(filters.lng))
-    if (filters.radius != null) params.set('radius', String(filters.radius))
+    if (filters.radius != null) {
+      params.set('radius', String(filters.radius))
+      // Near-me only (withNearMeDefault is the one place that sets nearZip):
+      // the ZIP's clinics lead and are kept past the radius. This goes to the
+      // listing API, never into the page url.
+      if (filters.nearZip && /^\d{5}$/.test(filters.nearZip)) params.set('zip', filters.nearZip)
+    }
   }
   return params
 }

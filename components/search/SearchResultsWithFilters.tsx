@@ -8,6 +8,7 @@ import { ClinicCardSkeletonGrid } from '@/components/shared/ClinicCardSkeletonGr
 import { LocationFilterBar } from '@/components/shared/LocationFilterBar'
 import type { ListingFilterValues } from '@/components/shared/applyListingFilters'
 import type { DirectoryClinic, StateFilterOption } from '@/lib/location-queries'
+import { usePublishListing } from '@/lib/listing-count-store'
 
 /**
  * The url keys the listing panel writes (FILTER_KEYS in ListingFilters.tsx).
@@ -161,6 +162,10 @@ export function SearchResultsWithFilters({
     }
     return out
   }, [clinics, extra])
+
+  // The page's count pills follow this list and pulse with it (2026-09-28),
+  // see lib/listing-count-store.ts.
+  usePublishListing(totalCount, pending)
 
   const reachable = Math.min(totalCount, resultCap)
   const canLoadMore = !exhausted && allClinics.length < reachable

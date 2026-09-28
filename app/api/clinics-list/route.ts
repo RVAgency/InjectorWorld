@@ -67,6 +67,9 @@ export async function GET(req: NextRequest) {
       // Listing filters run in SQL as of 2026-08-07, so `total` below is the
       // real number of matches, not the unfiltered count.
       ...parseLeanListingFilters(searchParams),
+      // The /clinics hero shows states and average rating for the listed set
+      // (2026-09-28), so they come back with the count.
+      withStats: true,
     }),
   ])
 
@@ -98,6 +101,8 @@ export async function GET(req: NextRequest) {
       // clinic is outside the near cutoff, so the card can tell "far away" from
       // "right here" instead of reading a missing value as zero.
       distanceMiles: num(c.distance_miles) ?? undefined,
+      // In the near-me ZIP; only near-me rows carry it (2026-09-28).
+      inZip: c.in_zip === true ? true : undefined,
       // Providers aren't live yet; DirectoryClinicCard hides this row at 0.
       providerCount: 0,
     }
@@ -106,6 +111,12 @@ export async function GET(req: NextRequest) {
   return cacheListing(cacheKey, {
     clinics,
     totalDocs: res.totalCount,
+    // Near-me only (2026-09-28): how many of totalDocs are in the visitor's ZIP,
+    // and, for an empty radius, the first wider rung that has clinics.
+    zipCount: res.zipCount,
+    ...(res.widerRadius !== undefined ? { widerRadius: res.widerRadius } : {}),
+    // Distinct states and average rating of the listed set, for the hero.
+    stats: res.stats ?? null,
     hasNextPage: page * limit < res.totalCount,
     page,
   })

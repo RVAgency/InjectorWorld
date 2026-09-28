@@ -106,20 +106,38 @@ export const NEAR_BUCKET_MILES = 5
  * one request. Every value here must also exist in RADIUS_OPTIONS in
  * ListingFilters.tsx, so the left-hand control and this default agree by
  * construction. See docs/LISTING-FIX-PLAN-2026-09-19.md TASK 2.
+ *
+ * 3 miles first (2026-09-28, founder call), with the visitor's own ZIP ahead
+ * of it: clinics IN the ZIP lead the list, then the rest within 3 miles,
+ * nearest first. Measured the same way on 400 random ZIP centroids: 22% have a
+ * clinic inside the ZIP, 38% within 3 miles, 56% within 10, 86% within 25, 95%
+ * within 50. An empty rung no longer costs one request per rung: the listing
+ * API answers an empty result with the first wider rung that has clinics
+ * (`widerRadius`), so the list jumps straight there.
  */
-export const NEAR_ME_RADIUS_LADDER = [10, 25, 50] as const
+export const NEAR_ME_RADIUS_LADDER = [3, 10, 25, 50] as const
+
+/**
+ * How far from the ZIP centre a clinic that is IN the visitor's ZIP is still
+ * looked for. The ZIP half of the near-me filter is bounded by this box so it
+ * can use the latitude index like the radius half: unbounded, "OR zip = X"
+ * scanned the whole table (1.3 to 1.9 s against 9 to 29 ms, staging
+ * 2026-09-28). 99.8% of clinics sit within 25 miles of their own ZIP centre;
+ * the 130 that do not are almost all bad coordinates.
+ */
+export const NEAR_ME_ZIP_REACH_MILES = 25
 
 /**
  * Radius, in miles, for the ZIP-located default listing on the three pillar
- * pages (2026-09-10, founder call). See docs/ZIP-NEAR-ME-LISTING-2026-09-10.md
+ * pages (2026-09-10, founder call; 10 miles until 2026-09-28, now 3). See
+ * docs/ZIP-NEAR-ME-LISTING-2026-09-10.md
  *
- * Not the ZIP itself: a single ZIP holds a median of 4 published clinics and
+ * Not the ZIP alone: a single ZIP holds a median of 4 published clinics and
  * ~33,000 of 41,488 US ZIPs hold none, so an exact-ZIP listing would be empty
- * for most visitors. 10 miles around the centroid is 307 clinics in Houston --
- * a full page that still reads as local.
+ * for most visitors. The ZIP's clinics lead, and the radius fills the page.
  *
- * 10 is also one of RADIUS_OPTIONS in ListingFilters, so this default and the
- * left-hand radius control agree by construction. Keep it that way.
+ * Every rung is also one of RADIUS_OPTIONS in ListingFilters, so this default
+ * and the left-hand radius control agree by construction. Keep it that way.
  *
  * The first rung of the ladder above. Kept as a named export because CLAUDE.md
  * and docs/ZIP-NEAR-ME-LISTING-2026-09-10.md both refer to the near-me radius
@@ -217,6 +235,8 @@ export type MeritClinicLike = {
   photoUrl?: string
   startingPrice?: number
   distanceMiles?: number
+  /** In the visitor's own ZIP, on a near-me listing. Such clinics lead. */
+  inZip?: boolean
 }
 
 /** The merit proxy used for clinics: rating → review count → completeness. */
@@ -287,6 +307,9 @@ export function sortClinicsByDistance<T extends MeritClinicLike>(clinics: T[]): 
       : Number.POSITIVE_INFINITY
 
   return [...clinics].sort((a, b) => {
+    // The visitor's own ZIP first (2026-09-28), exactly as the SQL orders it.
+    // Only near-me rows ever carry inZip, so every other list is unchanged.
+    if (Boolean(a.inZip) !== Boolean(b.inZip)) return a.inZip ? -1 : 1
     const da = miles(a)
     const db = miles(b)
     // Compared, not subtracted: Infinity - Infinity is NaN, which sort()

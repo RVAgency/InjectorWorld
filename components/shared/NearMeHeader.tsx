@@ -7,7 +7,9 @@ import type { NearMeState } from './useNearMe'
 /**
  * Heading + count + ZIP changer for the three pillar listings (2026-09-10).
  *
- * Located: `Top Clinics in 77009, Houston, TX`, with the count for that radius.
+ * Located: `Top Clinics in 77009, Houston, TX`, with the count for that radius
+ * and, since 2026-09-28, how many of them are in the visitor's own ZIP (or a
+ * plain note that the ZIP has none and how far the list reaches instead).
  * Not located: today's heading, unchanged, plus a "Set your ZIP" control --
  * required, because a visitor whose IP gave nothing (outside the US, VPN, geo
  * over budget) otherwise has no way to reach a local list at all.
@@ -27,6 +29,7 @@ export function NearMeHeader({
   fallbackHeading,
   radiusMiles,
   ladderExhausted,
+  zipCount,
 }: {
   near: NearMeState
   /** False on state and city pages: the visitor already chose a place there. */
@@ -47,6 +50,12 @@ export function NearMeHeader({
    * within 50 miles of them, which is a different thing and not true.
    */
   ladderExhausted?: boolean
+  /**
+   * How many of `total` are in the visitor's own ZIP, from the listing API
+   * (2026-09-28). Null or undefined when the listing did not send a ZIP, in
+   * which case the plain "within N miles" line is shown.
+   */
+  zipCount?: number | null
 }) {
   const [open, setOpen] = useState(false)
   const [draft, setDraft] = useState('')
@@ -123,9 +132,15 @@ export function NearMeHeader({
         )}
       </div>
 
+      {/* 2026-09-28: the visitor's ZIP leads the list. When it has no clinic
+          of its own, say so, and say how far the list reaches instead. */}
       {located && typeof total === 'number' && (
         <p className="mt-2 text-body-sm text-ink-secondary">
-          {total.toLocaleString()} {total === 1 ? 'clinic' : 'clinics'} within {radiusMiles} miles
+          {typeof zipCount === 'number' && zipCount === 0
+            ? `No clinics in ${near.zip}. Showing ${total.toLocaleString()} ${total === 1 ? 'clinic' : 'clinics'} within ${radiusMiles} miles.`
+            : typeof zipCount === 'number' && zipCount > 0
+              ? `${zipCount.toLocaleString()} ${zipCount === 1 ? 'clinic' : 'clinics'} in ${near.zip}, plus nearby within ${radiusMiles} miles (${total.toLocaleString()} total)`
+              : `${total.toLocaleString()} ${total === 1 ? 'clinic' : 'clinics'} within ${radiusMiles} miles`}
         </p>
       )}
 

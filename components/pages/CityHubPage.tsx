@@ -193,7 +193,9 @@ export function CityHubPage({ data, schema }: Props) {
           </h1>
           {totalClinics > 0 && (
             <div className="mt-5 flex flex-wrap gap-3">
-              <CountPill count={totalClinics} label="verified aesthetic clinics" />
+              {/* The live total of the list below (2026-09-28), not the page's fixed number:
+                  it follows the filter panel, and pulses while a re-query runs. */}
+              <CountPill count={serverTotal} label="verified aesthetic clinics" pending={fetchPhase === 'replacing'} />
             </div>
           )}
         </div>

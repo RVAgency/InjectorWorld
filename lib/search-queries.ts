@@ -18,12 +18,16 @@ import {
   parseSearchQuery,
   buildServiceLookup,
   buildBrandLookup,
+  buildTolerantLookups,
+  resolveTolerant,
   type IntentLookups,
+  type ParsedIntent,
 } from './search-intent'
 import { leanHydrateClinics, leanHydrationEnabled } from './search-hydrate'
 import { blendedScoreSql, rankedSqlEnabled } from './search-ranking-sql'
 import { ttlMemo } from './ttl-memo'
 import { parseLeanListingFilters, type LeanListingFilters } from './lean-clinic-listing'
+import { NEAR_ME_RADIUS_LADDER, NEAR_ME_ZIP_REACH_MILES } from './merit'
 
 // ── PostGIS availability cache ────────────────────────────────────────────────
 // Some DB instances (DigitalOcean Managed Postgres out-of-box) do not have
@@ -276,8 +280,16 @@ export function readSearchPageRequest(sp: URLSearchParams): SearchPageRequest {
   }
 }
 
-/** One page of /search results. Page 1 is the server render, later pages are Load more. */
-export function searchPageResults(req: SearchPageRequest, page = 1): Promise<SearchResult> {
+/**
+ * One page of /search results. Page 1 is the server render, later pages are
+ * Load more. `visitorLocation` answers "near me" queries; both callers pass one
+ * built from the same request, so page 2 is centred where page 1 was.
+ */
+export function searchPageResults(
+  req: SearchPageRequest,
+  page = 1,
+  visitorLocation?: SearchParams['visitorLocation'],
+): Promise<SearchResult> {
   return searchDirectory({
     q: req.q,
     treatment: req.treatment,
@@ -287,6 +299,7 @@ export function searchPageResults(req: SearchPageRequest, page = 1): Promise<Sea
     // allowGeocode turns a ZIP / place name into a radius search.
     allowGeocode: true,
     filters: req.filters,
+    visitorLocation,
   })
 }
 
@@ -321,6 +334,19 @@ export type SearchParams = {
    * search with no filters, are unchanged. See SearchListingFilters.
    */
   filters?: SearchListingFilters
+  /**
+   * Where the visitor is, for a "near me" query that names no place: the
+   * centre of their ZIP and its label. Called lazily, only for such a query.
+   * Leave it out on any response that is cached for everyone (/api/search),
+   * or one visitor's location would be served to the next.
+   */
+  visitorLocation?: () => Promise<{ lat: number; lng: number; label: string; zip?: string } | null>
+  /**
+   * Internal: parse the query with exact dictionary matching only, which is
+   * how search behaved before spelling tolerance (2026-09-28). searchDirectory
+   * sets it itself when a tolerant reading finds nothing.
+   */
+  exactParse?: boolean
 }
 
 export type SearchResult = {
@@ -333,7 +359,21 @@ export type SearchResult = {
   limit: number
   /** The point the search was centered on, when a location resolved to coords. */
   center?: { lat: number; lng: number } | null
+  /**
+   * Set when the search was centred on a ZIP with the default radius
+   * (2026-09-28): the ZIP, how many results are in it (they lead the list),
+   * and the radius the list reaches. The page words the "no clinics in this
+   * ZIP" note from it.
+   */
+  zipNotice?: { zip: string; zipCount: number; radiusMiles: number }
 }
+
+/**
+ * Radii a ZIP-centred search tries in order (2026-09-28), the same ladder the
+ * near-me listings use: the ZIP's own clinics first, then the rest within 3
+ * miles, widening only when a rung has nothing. Was a flat 25 miles.
+ */
+const ZIP_SEARCH_RADIUS_LADDER = NEAR_ME_RADIUS_LADDER
 
 function slugify(s: string): string {
   return s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
@@ -366,6 +406,11 @@ function mapClinic(c: any, slugMap: Map<string, { citySlug: string; stateSlug: s
     distanceMiles,
     textRank,
   }
+}
+
+/** Five digits, or nothing: a ZIP is interpolated into SQL as a literal. */
+function safeZip(z: string | undefined | null): string | undefined {
+  return typeof z === 'string' && /^\d{5}$/.test(z) ? z : undefined
 }
 
 /**
@@ -463,8 +508,16 @@ async function getLookups(payload: any, pool: any): Promise<SearchLookups> {
   // and would otherwise be parsed as name text.
   for (const phrase of Object.keys(STATE_NAME_METRO_OVERRIDES)) locationPhrases.add(phrase)
 
+  // Spelling-tolerant keys over the same dictionaries (lib/search-intent.ts).
+  const tolerant = buildTolerantLookups({
+    treatmentPhraseToSlug,
+    brandPhraseToSlug,
+    serviceSlugs: new Set(treatments.map((t) => t.slug)),
+    brandSlugs: new Set(brands.map((b) => b.slug)),
+  })
+
   const lk: SearchLookups = {
-    intent: { treatmentPhraseToSlug, brandPhraseToSlug, locationPhrases },
+    intent: { treatmentPhraseToSlug, brandPhraseToSlug, locationPhrases, tolerant },
     slugToTreatment,
     slugToBrand,
     stateByName,
@@ -499,6 +552,10 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
   let lat = hasGeo ? (params.lat as number) : undefined
   let lng = hasGeo ? (params.lng as number) : undefined
   let radiusMeters = (params.radiusMiles ?? DEFAULT_RADIUS_MILES) * METERS_PER_MILE
+  // Set when the search centre comes from a ZIP (typed, in the location field,
+  // or the visitor's own for "near me"). With no radius passed in, such a search
+  // runs ZIP first on ZIP_SEARCH_RADIUS_LADDER instead of a flat 25 miles.
+  let zipCenter: string | undefined
 
   const empty: SearchResult = {
     clinics: [],
@@ -514,7 +571,12 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
   const lk = await getLookups(payload, pool)
 
   // ── Parse the omnibox query into intent ──────────────────────────────────
-  const parsed = rawQ ? parseSearchQuery(rawQ, lk.intent) : { freeText: '' as string }
+  const parsed: ParsedIntent = rawQ
+    ? parseSearchQuery(rawQ, lk.intent, { exactOnly: params.exactParse })
+    : { freeText: '' }
+  // Whether spelling tolerance, a dropped noise word or "near me" shaped this
+  // search. Such a search that finds nothing is re-run the old way at the end.
+  let usedTolerance = !!parsed.tolerant
 
   // ── Resolve treatment (explicit param wins, else parsed) ─────────────────
   let treatmentId: number | undefined
@@ -523,6 +585,14 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
   if (explicitTreatment) {
     const phrase = explicitTreatment.toLowerCase()
     treatmentSlug = lk.intent.treatmentPhraseToSlug.get(phrase) ?? slugify(explicitTreatment)
+    // Same tolerance for the legacy `treatment` param ("lip fillers").
+    if (!lk.slugToTreatment.has(treatmentSlug) && !params.exactParse && lk.intent.tolerant) {
+      const tolerantSlug = resolveTolerant(explicitTreatment, lk.intent.tolerant, 'treatment')
+      if (tolerantSlug) {
+        treatmentSlug = tolerantSlug
+        usedTolerance = true
+      }
+    }
   }
   if (treatmentSlug) {
     const t = lk.slugToTreatment.get(treatmentSlug)
@@ -570,6 +640,7 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
         lng = offlineHit.lng
         hasGeo = true
         locationLabel = offlineHit.label
+        zipCenter = zip5
       } else if (allowGeocode) {
         const hit = await geocode(zip5)
         if (hit) {
@@ -577,6 +648,7 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
           lng = hit.lng
           hasGeo = true
           locationLabel = hit.label
+          zipCenter = zip5
         } else {
           cityLike = `%${lc}%`
           locationLabel = locationQ
@@ -631,6 +703,22 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     locationLabel = locationQ || undefined
   }
 
+  // ── "near me" -> the visitor's own ZIP, when nothing else names a place ───
+  // A typed place, a ZIP or coordinates always win. Without a visitorLocation
+  // (a cached response, a bot, a visitor outside the US) the phrase is simply
+  // dropped and the search runs nationwide, which is what it did before minus
+  // the zero-result name match on "near" and "me".
+  if (parsed.nearMe && !locationQ && !hasGeo && !parsed.zip && params.visitorLocation) {
+    const here = await params.visitorLocation().catch(() => null)
+    if (here && Number.isFinite(here.lat) && Number.isFinite(here.lng)) {
+      lat = here.lat
+      lng = here.lng
+      hasGeo = true
+      locationLabel = here.label
+      zipCenter = safeZip(here.zip)
+    }
+  }
+
   // ── ZIP / free-text -> free-text query (+ optional geocoding) ─────────────
   // When geocoding is allowed, a ZIP becomes a radius search. When it is not
   // (live as-you-type), the ZIP is folded back into the text query so it still
@@ -644,6 +732,7 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
       lng = offlineZip.lng
       hasGeo = true
       locationLabel = locationLabel || offlineZip.label
+      zipCenter = parsed.zip
     } else if (allowGeocode) {
       const hit = await geocode(parsed.zip)
       if (hit) {
@@ -651,6 +740,7 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
         lng = hit.lng
         hasGeo = true
         locationLabel = locationLabel || hit.label
+        zipCenter = parsed.zip
       } else {
         freeText = [freeText, parsed.zip].filter(Boolean).join(' ')
       }
@@ -662,6 +752,11 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
       freeText = [freeText, parsed.zip].filter(Boolean).join(' ')
     }
   }
+
+  // A ZIP-centred search with no radius passed in starts at the first rung.
+  zipCenter = safeZip(zipCenter)
+  const zipLadder = !!zipCenter && params.radiusMiles == null
+  if (zipLadder) radiusMeters = ZIP_SEARCH_RADIUS_LADDER[0] * METERS_PER_MILE
 
   let tsquery = freeText ? toPrefixTsQuery(freeText) : ''
 
@@ -693,9 +788,19 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
       `${a}latitude IS NOT NULL AND ${a}longitude IS NOT NULL ` +
       `AND ${a}latitude <> 0 AND ${a}longitude <> 0`
 
+    // ZIP-centred search (2026-09-28): the radius OR the ZIP's own clinics.
+    // The ZIP half is boxed like the near-me listing's, so it stays on the
+    // latitude index; an unbounded "OR zip = X" scans the whole table. zipCenter
+    // is five digits (safeZip), so it is safe as a literal.
+    // Without a ZIP the clause is exactly what it always was.
+    const withZip = (radiusClause: string) =>
+      zipLadder
+        ? `(${radiusClause} OR (${clinicBoundingBoxSql(lat!, lng!, NEAR_ME_ZIP_REACH_MILES, alias)} AND ${a}zip = '${zipCenter}'))`
+        : radiusClause
+
     if (geoEnabled) {
       return {
-        whereClause: `(${hasCoords} AND ST_DWithin(${clinicGeog(alias)}, geography(ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)), ${radiusMeters}))`,
+        whereClause: withZip(`(${hasCoords} AND ST_DWithin(${clinicGeog(alias)}, geography(ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)), ${radiusMeters}))`),
         distExpr: clinicDistanceMeters(lat!, lng!, alias),
       }
     }
@@ -706,7 +811,7 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     // filter; see boundingBoxForRadius in search-sql.ts.
     const distExpr = clinicDistanceMetersHaversine(lat!, lng!, alias)
     const box = clinicBoundingBoxSql(lat!, lng!, radiusMeters / METERS_PER_MILE, alias)
-    return { whereClause: `(${hasCoords} AND ${box} AND ${distExpr} <= ${radiusMeters})`, distExpr }
+    return { whereClause: withZip(`(${hasCoords} AND ${box} AND ${distExpr} <= ${radiusMeters})`), distExpr }
   }
 
   // ── Clinic candidate query ───────────────────────────────────────────────
@@ -829,8 +934,14 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     rank: Map<number, number>
     /** Clinics matching the filters. Equals ids.length on the unranked path. */
     total: number
+    /** Candidate ids in the centre ZIP (zipLadder only). */
+    inZip: Set<number>
+    /** How many of `total` are in the centre ZIP (zipLadder only, else 0). */
+    zipTotal: number
   }> {
     const { params, whereSql, distExpr, rankExpr } = candidateWhere(true)
+    // ZIP-centred: the ZIP's own clinics first (2026-09-28). A literal, see safeZip.
+    const zipExpr = zipLadder ? `(c.zip = '${zipCenter}')` : null
 
     // Two candidate strategies.
     //
@@ -844,7 +955,7 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     // runs afterwards and still decides the final order; see that file for why.
     const ranked = rankedSqlEnabled()
     const orderBy = ranked
-      ? `ORDER BY ${blendedScoreSql('c', {
+      ? `ORDER BY ${zipExpr ? `${zipExpr} DESC, ` : ''}${blendedScoreSql('c', {
           distExpr: hasGeo ? distExpr : null,
           tsRankExpr: tsquery ? rankExpr : null,
         })} DESC, c.id DESC`
@@ -857,7 +968,7 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
       ? Math.min(CANDIDATE_CAP, page * limit + RANKED_FETCH_MARGIN)
       : CANDIDATE_CAP
 
-    const sql = `SELECT c.id AS id, ${distExpr} AS dist_m, ${rankExpr} AS text_rank
+    const sql = `SELECT c.id AS id, ${distExpr} AS dist_m, ${rankExpr} AS text_rank${zipExpr ? `, ${zipExpr} AS in_zip` : ''}
                  FROM clinics c
                  ${whereSql}
                  ${orderBy}
@@ -865,36 +976,42 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     const res = await pool.query(sql, params)
     const dist = new Map<number, number>()
     const rank = new Map<number, number>()
+    const inZip = new Set<number>()
     const ids: number[] = []
     for (const row of res.rows) {
       const id = Number(row.id)
       ids.push(id)
       if (row.dist_m != null) dist.set(id, Number(row.dist_m))
       if (row.text_rank != null) rank.set(id, Number(row.text_rank))
+      if (row.in_zip === true) inZip.add(id)
     }
 
     // The real match count. Measured on production for the largest filter
     // (q=botox, 51,074 matches): 72ms server-side, so this is cheap enough to
     // run per search and is what stops the UI reporting "3000" for everything.
     let total = ids.length
+    let zipTotal = inZip.size
     if (ranked) {
       const countRes = await pool.query(
-        `SELECT count(*)::int AS n FROM clinics c ${whereSql}`,
+        `SELECT count(*)::int AS n${zipExpr ? `, count(*) FILTER (WHERE ${zipExpr})::int AS z` : ''} FROM clinics c ${whereSql}`,
         params,
       )
       total = Number(countRes.rows[0]?.n ?? ids.length)
+      if (zipExpr) zipTotal = Number(countRes.rows[0]?.z ?? inZip.size)
     }
 
-    return { ids, dist, rank, total }
+    return { ids, dist, rank, total, inZip, zipTotal }
   }
 
   // ── Hydrate + rank one pass ──────────────────────────────────────────────
-  async function runPass(): Promise<{ clinics: SearchClinic[]; clinicTotal: number }> {
+  async function runPass(): Promise<{ clinics: SearchClinic[]; clinicTotal: number; zipTotal: number }> {
     let clinics: SearchClinic[] = []
     let clinicTotal = 0
+    let zipTotal = 0
     {
-      const { ids, dist, rank, total } = await clinicCandidates()
+      const { ids, dist, rank, total, inZip, zipTotal: zt } = await clinicCandidates()
       clinicTotal = total
+      zipTotal = zt
       if (ids.length) {
         // Two ways to turn candidate ids into rows, same fields either way.
         // The lean path skips payload.find's unconditional relationship joins,
@@ -914,17 +1031,35 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
         const mapped = docs.map((c) =>
           mapClinic(c, slugMap, 0, toMiles(dist.get(Number(c.id))), rank.get(Number(c.id))),
         )
-        clinics = rankClinics(mapped, { useDistance: hasGeo, useText: !!tsquery }).slice(
-          (page - 1) * limit,
-          page * limit,
-        )
+        const rankedList = rankClinics(mapped, { useDistance: hasGeo, useText: !!tsquery })
+        // ZIP-centred: the ZIP's own clinics lead, each group keeping the
+        // ranking order (2026-09-28). Same order the SQL fetched them in.
+        const ordered = inZip.size
+          ? [
+              ...rankedList.filter((c) => inZip.has(Number(c.id))),
+              ...rankedList.filter((c) => !inZip.has(Number(c.id))),
+            ]
+          : rankedList
+        clinics = ordered.slice((page - 1) * limit, page * limit)
       }
     }
 
-    return { clinics, clinicTotal }
+    return { clinics, clinicTotal, zipTotal }
   }
 
   let pass = await runPass()
+
+  // ── ZIP ladder ───────────────────────────────────────────────────────────
+  // A ZIP-centred search whose ZIP and 3-mile radius hold nothing widens to
+  // 10, 25, then 50 miles, stopping at the first rung with a result, exactly
+  // like the near-me listings. Page 2 of the same search climbs the same way,
+  // so it always pages the rung page 1 showed.
+  if (zipLadder) {
+    for (let i = 1; pass.clinicTotal === 0 && i < ZIP_SEARCH_RADIUS_LADDER.length; i++) {
+      radiusMeters = ZIP_SEARCH_RADIUS_LADDER[i] * METERS_PER_MILE
+      pass = await runPass()
+    }
+  }
 
   // ── Clinic-name rescue ───────────────────────────────────────────────────
   // `locationPhrases` is built from EVERY distinct city and neighborhood across
@@ -948,6 +1083,10 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
   // because those come from exact matches against the Brands/Services tables,
   // not from a fuzzy word list.
   const locationWasGuessed = !!parsed.location && !explicitLocation
+  // Kept so a rescue that also finds nothing does not wipe the place from the
+  // heading: "Lip Filler in houston, 0 results" says more than "Lip Filler".
+  const labelBeforeRescue = locationLabel
+  let rescued = false
   if (
     pass.clinicTotal === 0 &&
     rawQ &&
@@ -964,6 +1103,7 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     stateCode = undefined
     cityLike = undefined
     locationLabel = undefined
+    rescued = true
     if (tsquery) pass = await runPass()
   }
 
@@ -997,6 +1137,25 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     }
   }
 
+  // Nothing found after the rescue either: show the place the visitor typed.
+  if (rescued && pass.clinicTotal === 0 && !hasGeo) locationLabel = labelBeforeRescue
+
+  // ── Safety net for the tolerant reading ─────────────────────────────────
+  // A reading shaped by spelling tolerance, a dropped noise word or "near me"
+  // that finds nothing is re-run exactly as search worked before 2026-09-28.
+  // So the tolerance can only add results: a clinic whose NAME is
+  // "Lip Fillers Studio" is still found by typing that name.
+  // Not when a listing filter is what emptied it (the reading itself matches):
+  // that zero is real, and the old reading would only lose the heading.
+  if (
+    usedTolerance &&
+    !params.exactParse &&
+    pass.clinicTotal === 0 &&
+    !(filtersActive && (await unfilteredMatchExists()))
+  ) {
+    return searchDirectory({ ...params, exactParse: true })
+  }
+
   return {
     clinics: pass.clinics,
     serviceLabel: treatmentLabel,
@@ -1006,6 +1165,15 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     page,
     limit,
     center: hasGeo ? { lat: lat!, lng: lng! } : null,
+    ...(zipLadder && zipCenter
+      ? {
+          zipNotice: {
+            zip: zipCenter,
+            zipCount: pass.zipTotal,
+            radiusMiles: Math.round(radiusMeters / METERS_PER_MILE),
+          },
+        }
+      : {}),
   }
 }
 

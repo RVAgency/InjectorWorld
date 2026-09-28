@@ -12,7 +12,7 @@ import { NEAR_ME_RADIUS_LADDER } from '@/lib/merit'
  * page-1 refetch effect already reacts to. No parallel fetch mechanism.
  *
  * Resets whenever the ZIP changes, so a visitor who moves from a rural ZIP to a
- * city one starts at 10 miles again.
+ * city one starts at the first rung (3 miles) again.
  *
  * See docs/LISTING-FIX-PLAN-2026-09-19.md TASK 2.
  */
@@ -37,6 +37,21 @@ export function useNearMeRadius(zip: string | null, queryKey: string = '') {
     setStep((s) => Math.min(s + 1, NEAR_ME_RADIUS_LADDER.length))
   }, [])
 
+  /**
+   * Jump straight to the rung the listing API named (2026-09-28): an empty
+   * radius response carries `widerRadius`, the first wider rung that has
+   * clinics, or null when none has. Skips the empty rungs in between instead
+   * of fetching each one. Anything unexpected falls back to one step.
+   */
+  const widenTo = useCallback((target: number | null | undefined) => {
+    if (target === null) {
+      setStep(NEAR_ME_RADIUS_LADDER.length)
+      return
+    }
+    const index = typeof target === 'number' ? (NEAR_ME_RADIUS_LADDER as readonly number[]).indexOf(target) : -1
+    setStep((s) => (index > s ? index : Math.min(s + 1, NEAR_ME_RADIUS_LADDER.length)))
+  }, [])
+
   const exhausted = step >= NEAR_ME_RADIUS_LADDER.length
 
   return {
@@ -45,5 +60,6 @@ export function useNearMeRadius(zip: string | null, queryKey: string = '') {
     /** True once even the widest rung returned nothing. */
     exhausted,
     widen,
+    widenTo,
   }
 }

@@ -7,6 +7,7 @@ import { getLocationFilterOptions } from '@/lib/location-queries'
 import { LocationPicker } from '@/components/shared/LocationPicker'
 import { staticPageMetadata } from '@/lib/seo-metadata'
 import { ClinicsGrid } from './ClinicsGrid'
+import { LiveClinicsStats } from '@/components/clinics/LiveClinicsStats'
 
 export const revalidate = 300
 
@@ -55,19 +56,10 @@ export default async function ClinicsPage() {
           </p>
 
           {/* Quick stats. Real numbers only: a failed read now throws instead
-              of rendering, so there is no placeholder case left to show. */}
-          <div className="flex flex-wrap gap-6 mt-10 pt-10 border-t border-white/10">
-            {[
-              { n: stats.total.toLocaleString(), label: 'Clinics listed' },
-              { n: stats.stateCount.toLocaleString(), label: 'States' },
-              { n: stats.avgRating, label: 'Average rating' },
-            ].map(({ n, label }) => (
-              <div key={label}>
-                <div className="font-semibold text-[28px] leading-none text-white">{n}</div>
-                <div className="text-caption text-white/60 mt-1">{label}</div>
-              </div>
-            ))}
-          </div>
+              of rendering, so there is no placeholder case left to show.
+              Served with the national figures; they follow the listing below
+              once it reports (2026-09-28). */}
+          <LiveClinicsStats initial={stats} />
 
           {/* State picker, matching the brand and service pillar heroes. It
               replaces the <select> that used to sit in the grid's filter bar,

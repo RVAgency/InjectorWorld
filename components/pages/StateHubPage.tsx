@@ -155,7 +155,9 @@ export function StateHubPage({ data, schema }: Props) {
           </h1>
           {totalClinics > 0 && (
             <div className="mt-5 flex flex-wrap gap-3">
-              <CountPill count={totalClinics} label="verified clinics" />
+              {/* The live total of the list below (2026-09-28), not the page's fixed number:
+                  it follows the filter panel, and pulses while a re-query runs. */}
+              <CountPill count={serverTotal} label="verified clinics" pending={fetchPhase === 'replacing'} />
             </div>
           )}
 

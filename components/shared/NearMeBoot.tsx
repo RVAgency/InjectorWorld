@@ -32,8 +32,9 @@ import { NEAR_ME_RADIUS_LADDER } from '@/lib/merit'
  * the moment a place is known, a saved ZIP straight away or the geo answer when
  * it lands, and parks it on window.__iwNearMeList. The URL is built the way the
  * listing builds its own default near-me request: the ZIP centre (never the IP
- * point), coordinates at 4 decimals (roundForCache), and the first rung of
- * NEAR_ME_RADIUS_LADDER. lib/near-me-prefetch.ts uses the parked answer only
+ * point), coordinates at 4 decimals (roundForCache), the first rung of
+ * NEAR_ME_RADIUS_LADDER and, since 2026-09-28, the ZIP itself (its clinics
+ * lead; toServerFilterParams sends it). lib/near-me-prefetch.ts uses the parked answer only
  * when the listing's own URL is identical, so ordering, the ladder and the
  * filters are untouched; a mismatch just means a normal fetch.
  */
@@ -51,15 +52,15 @@ export function NearMeBoot({ listUrl }: { listUrl?: string }) {
           `var L=${L},R=${R};` +
           "function n(v){return typeof v==='number'&&isFinite(v)}" +
           "function f(v){return String(Number(v.toFixed(4)))}" +
-          "function list(a,b){if(!L||w.__iwNearMeList||!w.fetch)return;var u=L+'&lat='+f(a)+'&lng='+f(b)+'&radius='+R;" +
+          "function list(a,b,z){if(!L||w.__iwNearMeList||!w.fetch)return;var u=L+'&lat='+f(a)+'&lng='+f(b)+'&radius='+R+'&zip='+z;" +
           "w.__iwNearMeList={url:u,p:fetch(u).then(function(r){return r.ok?r.json():null})['catch'](function(){return null})}}" +
           "var s=null;try{s=localStorage.getItem('iw:near-me')}catch(e){}" +
-          "if(s){try{var p=JSON.parse(s);if(p&&typeof p.zip==='string'&&/^\\d{5}$/.test(p.zip)&&n(p.lat)&&n(p.lng))list(p.lat,p.lng)}catch(e){}}" +
+          "if(s){try{var p=JSON.parse(s);if(p&&typeof p.zip==='string'&&/^\\d{5}$/.test(p.zip)&&n(p.lat)&&n(p.lng))list(p.lat,p.lng,p.zip)}catch(e){}}" +
           "else if(!w.__iwNearMeGeo&&w.fetch){w.__iwNearMeGeo=" +
           "fetch('/api/geo/ip?centre=1').then(function(r){return r.ok?r.json():null})" +
           "['catch'](function(){return null});" +
           "w.__iwNearMeGeo.then(function(g){if(g&&n(g.lat)&&n(g.lng)&&typeof g.zip==='string'&&/^\\d{5}$/.test(g.zip)" +
-          "&&g.centre&&n(g.centre.lat)&&n(g.centre.lng))list(g.centre.lat,g.centre.lng)})}}catch(e){}",
+          "&&g.centre&&n(g.centre.lat)&&n(g.centre.lng))list(g.centre.lat,g.centre.lng,g.zip)})}}catch(e){}",
       }}
     />
   )

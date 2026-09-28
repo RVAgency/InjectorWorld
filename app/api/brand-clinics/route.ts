@@ -110,6 +110,9 @@ export async function GET(req: NextRequest) {
   return cacheListing(cacheKey, {
     clinics,
     totalDocs: res.totalCount,
+    // Near-me only (2026-09-28). See app/api/clinics-list/route.ts.
+    zipCount: res.zipCount,
+    ...(res.widerRadius !== undefined ? { widerRadius: res.widerRadius } : {}),
     hasNextPage,
     nextPage: hasNextPage ? page + 1 : null,
   })
