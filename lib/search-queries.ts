@@ -23,6 +23,7 @@ import {
 import { leanHydrateClinics, leanHydrationEnabled } from './search-hydrate'
 import { blendedScoreSql, rankedSqlEnabled } from './search-ranking-sql'
 import { ttlMemo } from './ttl-memo'
+import { parseLeanListingFilters, type LeanListingFilters } from './lean-clinic-listing'
 
 // ── PostGIS availability cache ────────────────────────────────────────────────
 // Some DB instances (DigitalOcean Managed Postgres out-of-box) do not have
@@ -140,6 +141,155 @@ const CANDIDATE_CAP = 3000
  */
 const RANKED_FETCH_MARGIN = 25
 
+/**
+ * How deep /search can page. Every page is sliced out of at most CANDIDATE_CAP
+ * ranked candidates, so nothing past this many results is reachable; the page
+ * says "refine your search" beyond it rather than offering a Load more that
+ * would come back empty.
+ */
+export const SEARCH_RESULT_CAP = CANDIDATE_CAP
+
+/** Rows per /search page: page 1 is server-rendered, the rest come from /api/search/more. */
+export const SEARCH_PAGE_SIZE = 100
+
+/**
+ * The listing-panel filters (brand, service, clinic type, rating, distance),
+ * resolved in SQL the same way every other clinic listing resolves them
+ * (2026-09-28). Until then /search filtered in the browser over the 100 rows it
+ * had loaded, so a brand filter only searched those 100, the totals were wrong,
+ * and "Clinic type" always returned nothing because search rows carry no
+ * clinicType.
+ *
+ * `near` is deliberately absent: it is a SORT origin on the other listings, and
+ * search has its own ranking, which these filters must never change.
+ */
+export type SearchListingFilters = Omit<LeanListingFilters, 'near'>
+
+/** True when at least one listing filter would narrow the result set. */
+export function hasSearchListingFilters(f: SearchListingFilters | undefined): boolean {
+  if (!f) return false
+  return Boolean(
+    f.brandIds?.length ||
+      f.serviceIds?.length ||
+      f.clinicTypes?.length ||
+      f.minRating != null ||
+      (f.radiusMiles != null && f.lat != null && f.lng != null),
+  )
+}
+
+/**
+ * Defensive copy of the filters, so searchDirectory never depends on its caller
+ * having validated them. Ids, types and rating are bound parameters, but a
+ * non-integer id would still make the `::int[]` cast throw. lat, lng and radius
+ * are interpolated into SQL as numeric literals (the search-sql.ts contract),
+ * so they must be finite numbers in range or the distance filter is dropped.
+ */
+function sanitizeListingFilters(f: SearchListingFilters | undefined): SearchListingFilters {
+  if (!f) return {}
+  const ids = (v: number[] | undefined) => {
+    const out = (v ?? []).filter((n) => Number.isInteger(n) && n > 0)
+    return out.length ? out : undefined
+  }
+  const types = (f.clinicTypes ?? []).filter((t) => typeof t === 'string' && t.length > 0)
+  const rating = typeof f.minRating === 'number' && Number.isFinite(f.minRating) && f.minRating > 0
+    ? f.minRating
+    : undefined
+  const geoOk =
+    typeof f.radiusMiles === 'number' && Number.isFinite(f.radiusMiles) && f.radiusMiles > 0 &&
+    typeof f.lat === 'number' && Number.isFinite(f.lat) && f.lat >= -90 && f.lat <= 90 &&
+    typeof f.lng === 'number' && Number.isFinite(f.lng) && f.lng >= -180 && f.lng <= 180
+  return {
+    brandIds: ids(f.brandIds),
+    serviceIds: ids(f.serviceIds),
+    clinicTypes: types.length ? types : undefined,
+    minRating: rating,
+    ...(geoOk ? { radiusMiles: f.radiusMiles, lat: f.lat, lng: f.lng } : {}),
+  }
+}
+
+/**
+ * Everything the /search page reads from its url, in one place, so the page
+ * and /api/search/more (its Load more) build the search from exactly the same
+ * inputs. If they ever drifted, page 2 would be a page of a different search.
+ */
+export type SearchPageRequest = {
+  q: string
+  treatment: string
+  location: string
+  barState: string
+  barCity: string
+  /** What actually gets searched as the location. */
+  effectiveLocation: string
+  /** The omnibox prefill. */
+  omniValue: string
+  hasQuery: boolean
+  filters: SearchListingFilters
+  filtersActive: boolean
+}
+
+export function readSearchPageRequest(sp: URLSearchParams): SearchPageRequest {
+  const get = (key: string) => (sp.get(key) ?? '').trim()
+  const q = get('q')
+  // Backward-compatible: older links still use treatment/location params.
+  const treatment = get('treatment')
+  // `location` is what the USER typed (omnibox/hero). `state`/`city` come from
+  // the LocationFilterBar dropdown -- kept as separate params so selecting a
+  // state doesn't look like "the user typed a location" and hide the bar that
+  // just set it (that self-defeating loop was the bug: picking a state made
+  // the bar disappear because the code only checked one shared `location`).
+  const location = get('location')
+  const barState = get('state')
+  const barCity = get('city')
+  // What actually gets searched: typed location wins, else city (matches by
+  // name), else bare state code (searchDirectory already resolves 2-letter
+  // codes) -- both existing paths in searchDirectory, no backend change.
+  const effectiveLocation = location || barCity || barState
+  // The omnibox prefill is the free-text q, or the legacy fields joined.
+  const omniValue = q || [treatment, location].filter(Boolean).join(' ')
+  const hasQuery = !!(q || treatment || location || barState || barCity)
+
+  // The same parser every other listing route uses for these params, so a
+  // filter url means the same thing here as there. `near` is left out on
+  // purpose: see SearchListingFilters.
+  const parsed = parseLeanListingFilters(sp)
+  const filters: SearchListingFilters = {
+    brandIds: parsed.brandIds,
+    serviceIds: parsed.serviceIds,
+    clinicTypes: parsed.clinicTypes,
+    minRating: parsed.minRating,
+    radiusMiles: parsed.radiusMiles,
+    lat: parsed.lat,
+    lng: parsed.lng,
+  }
+
+  return {
+    q,
+    treatment,
+    location,
+    barState,
+    barCity,
+    effectiveLocation,
+    omniValue,
+    hasQuery,
+    filters,
+    filtersActive: hasSearchListingFilters(filters),
+  }
+}
+
+/** One page of /search results. Page 1 is the server render, later pages are Load more. */
+export function searchPageResults(req: SearchPageRequest, page = 1): Promise<SearchResult> {
+  return searchDirectory({
+    q: req.q,
+    treatment: req.treatment,
+    location: req.effectiveLocation,
+    limit: SEARCH_PAGE_SIZE,
+    page,
+    // allowGeocode turns a ZIP / place name into a radius search.
+    allowGeocode: true,
+    filters: req.filters,
+  })
+}
+
 export type SearchClinic = DirectoryClinic & { distanceMiles?: number; textRank?: number }
 
 export type SearchParams = {
@@ -165,6 +315,12 @@ export type SearchParams = {
    * turn it on.
    */
   allowGeocode?: boolean
+  /**
+   * Listing-panel filters, applied in SQL on top of whatever the query resolved
+   * to. They only ever narrow the match set: the ranking, and the result of a
+   * search with no filters, are unchanged. See SearchListingFilters.
+   */
+  filters?: SearchListingFilters
 }
 
 export type SearchResult = {
@@ -329,6 +485,8 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
   const page = Math.max(1, params.page ?? 1)
   const limit = Math.min(Math.max(1, params.limit ?? 24), 100)
   const allowGeocode = params.allowGeocode ?? false
+  const filters = sanitizeListingFilters(params.filters)
+  const filtersActive = hasSearchListingFilters(filters)
 
   // One-time PostGIS check. PostGIS is confirmed unavailable (not just
   // uninstalled) on the production DigitalOcean cluster, so geo search no
@@ -552,13 +710,16 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
   }
 
   // ── Clinic candidate query ───────────────────────────────────────────────
-  async function clinicCandidates(): Promise<{
-    ids: number[]
-    dist: Map<number, number>
-    rank: Map<number, number>
-    /** Clinics matching the filters. Equals ids.length on the unranked path. */
-    total: number
-  }> {
+  // WHERE clause for the current interpretation of the query. `applyFilters`
+  // adds the listing-panel filters; with it false (or no filters set) the SQL
+  // is exactly what it was before the filters existed, clause for clause and
+  // parameter for parameter, so an unfiltered search cannot change.
+  function candidateWhere(applyFilters: boolean): {
+    params: any[]
+    whereSql: string
+    distExpr: string
+    rankExpr: string
+  } {
     const params: any[] = []
     const bind = (v: any) => {
       params.push(v)
@@ -598,9 +759,78 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     if (cityLike) where.push(`(c.city ILIKE ${bind(cityLike)} OR c.neighborhood ILIKE ${bind(cityLike)})`)
     const clinicGeo = geoSql('c')
     if (clinicGeo.whereClause) where.push(clinicGeo.whereClause)
+    if (applyFilters && filtersActive) {
+      // Same SQL as fetchLeanClinics (lib/lean-clinic-listing.ts), so a filter
+      // means the same thing on /search as on every other listing: OR within
+      // brands, OR within services, AND across the groups.
+      if (filters.brandIds?.length) {
+        where.push(
+          `EXISTS (SELECT 1 FROM clinics_rels cr WHERE cr.parent_id = c.id AND cr.path = 'brandsOffered' AND cr.brands_id = ANY(${bind(
+            filters.brandIds,
+          )}::int[]))`,
+        )
+      }
+      if (filters.serviceIds?.length) {
+        where.push(
+          `EXISTS (SELECT 1 FROM clinics_rels cr WHERE cr.parent_id = c.id AND cr.path = 'servicesOffered' AND cr.services_id = ANY(${bind(
+            filters.serviceIds,
+          )}::int[]))`,
+        )
+      }
+      if (filters.clinicTypes?.length) {
+        // clinic_type is an enum; cast the column, never the array (see
+        // fetchLeanClinics for why).
+        where.push(`c.clinic_type::text = ANY(${bind(filters.clinicTypes)}::text[])`)
+      }
+      if (filters.minRating != null) {
+        where.push(`c.aggregate_rating >= ${bind(filters.minRating)}`)
+      }
+      const { radiusMiles: fRadius, lat: fLat, lng: fLng } = filters
+      if (fRadius != null && fLat != null && fLng != null) {
+        // The visitor's Distance choice, around the point the panel wrote to
+        // the url. Independent of any search centre above: a ZIP search keeps
+        // its own radius and this narrows it further. Box first (indexed
+        // columns), exact distance second. lat/lng/radius are numbers checked
+        // by sanitizeListingFilters, so interpolating them is safe, which is
+        // the same contract the helpers in search-sql.ts document.
+        const filterDist = geoEnabled
+          ? clinicDistanceMeters(fLat, fLng, 'c')
+          : clinicDistanceMetersHaversine(fLat, fLng, 'c')
+        where.push(clinicBoundingBoxSql(fLat, fLng, fRadius, 'c'))
+        where.push(`${filterDist} <= ${fRadius * METERS_PER_MILE}`)
+      }
+    }
     const distExpr = clinicGeo.distExpr
     const rankExpr = tsquery ? `ts_rank(${clinicTsv('c')}, to_tsquery('english', ${tsqRef}))` : 'NULL'
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
+    return { params, whereSql, distExpr, rankExpr }
+  }
+
+  /**
+   * Whether the query, WITHOUT the listing filters, matches anything.
+   *
+   * The clinic-name rescue and the place-name fallback below both re-read the
+   * query when it matched nothing. A filter that empties a perfectly good
+   * search ("houston" plus a brand no Houston clinic carries) must not trigger
+   * that, or "houston" would be re-read as a clinic name and the visitor would
+   * get clinics called Houston somewhere else. So when filters are on, the
+   * re-read only happens if the unfiltered query also matched nothing, which
+   * is exactly when it happened before filters existed.
+   */
+  async function unfilteredMatchExists(): Promise<boolean> {
+    const { params, whereSql } = candidateWhere(false)
+    const res = await pool.query(`SELECT 1 FROM clinics c ${whereSql} LIMIT 1`, params)
+    return res.rows.length > 0
+  }
+
+  async function clinicCandidates(): Promise<{
+    ids: number[]
+    dist: Map<number, number>
+    rank: Map<number, number>
+    /** Clinics matching the filters. Equals ids.length on the unranked path. */
+    total: number
+  }> {
+    const { params, whereSql, distExpr, rankExpr } = candidateWhere(true)
 
     // Two candidate strategies.
     //
@@ -718,7 +948,15 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
   // because those come from exact matches against the Brands/Services tables,
   // not from a fuzzy word list.
   const locationWasGuessed = !!parsed.location && !explicitLocation
-  if (pass.clinicTotal === 0 && rawQ && locationWasGuessed && !hasGeo) {
+  if (
+    pass.clinicTotal === 0 &&
+    rawQ &&
+    locationWasGuessed &&
+    !hasGeo &&
+    // Listing filters emptied a query that does match: that is a real "no
+    // results", not a misread name. See unfilteredMatchExists.
+    !(filtersActive && (await unfilteredMatchExists()))
+  ) {
     // Put the misread words back into the name query and drop the filters they
     // produced.
     freeText = [parsed.freeText, parsed.location].filter(Boolean).join(' ').trim()
@@ -742,7 +980,10 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     brandId === undefined &&
     !stateCode &&
     !cityLike &&
-    !hasGeo
+    !hasGeo &&
+    // Same guard as the rescue above: only a phrase that matches nothing on its
+    // own is re-read as a place, never one a listing filter emptied.
+    !(filtersActive && (await unfilteredMatchExists()))
   ) {
     const hit = await geocode(freeText)
     if (hit) {

@@ -1,7 +1,13 @@
 import type { Metadata } from 'next'
 import { Header } from '@/components/header/Header'
 import { Footer } from '@/components/footer/Footer'
-import { searchDirectory, getSearchFilterOptions } from '@/lib/search-queries'
+import {
+  getSearchFilterOptions,
+  readSearchPageRequest,
+  searchPageResults,
+  SEARCH_PAGE_SIZE,
+  SEARCH_RESULT_CAP,
+} from '@/lib/search-queries'
 import { getLocationFilterOptions } from '@/lib/location-queries'
 import { getTopResults } from '@/lib/search-content'
 import { TopResults } from '@/components/search/TopResults'
@@ -20,36 +26,35 @@ export const metadata: Metadata = {
   robots: { index: false, follow: true },
 }
 
+/** A Next searchParams object as URLSearchParams. A repeated key keeps its first value. */
+function toUrlSearchParams(sp: Record<string, string | string[] | undefined>): URLSearchParams {
+  const usp = new URLSearchParams()
+  for (const [key, value] of Object.entries(sp)) {
+    if (typeof value === 'string') usp.set(key, value)
+    else if (Array.isArray(value) && typeof value[0] === 'string') usp.set(key, value[0])
+  }
+  return usp
+}
+
 export default async function SearchPage({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string; treatment?: string; location?: string; state?: string; city?: string }>
+  searchParams: Promise<Record<string, string | string[] | undefined>>
 }) {
-  const sp = await searchParams
-  const q = (sp.q ?? '').trim()
-  // Backward-compatible: older links still use treatment/location params.
-  const treatment = (sp.treatment ?? '').trim()
-  // `location` is what the USER typed (omnibox/hero). `state`/`city` come from
-  // the LocationFilterBar dropdown -- kept as separate params so selecting a
-  // state doesn't look like "the user typed a location" and hide the bar that
-  // just set it (that self-defeating loop was the bug: picking a state made
-  // the bar disappear because the code only checked one shared `location`).
-  const location = (sp.location ?? '').trim()
-  const barState = (sp.state ?? '').trim()
-  const barCity = (sp.city ?? '').trim()
-  // What actually gets searched: typed location wins, else city (matches by
-  // name), else bare state code (searchDirectory already resolves 2-letter
-  // codes) -- both existing paths in searchDirectory, no backend change.
-  const effectiveLocation = location || barCity || barState
-  // The omnibox prefill is the free-text q, or the legacy fields joined.
-  const omniValue = q || [treatment, location].filter(Boolean).join(' ')
-  const hasQuery = !!(q || treatment || location || barState || barCity)
+  const usp = toUrlSearchParams(await searchParams)
+  // Query, location and listing filters, read the same way /api/search/more
+  // reads them for Load more (see readSearchPageRequest for what each means).
+  const request = readSearchPageRequest(usp)
+  const { q, treatment, location, barState, barCity, effectiveLocation, omniValue, hasQuery, filtersActive } =
+    request
 
-  // Request a generous page-1 window so the client "Load more" covers the set at
-  // current data scale. allowGeocode turns a ZIP / place name into a radius search.
+  // Page 1 is a generous window (SEARCH_PAGE_SIZE) that the results list
+  // reveals 12 at a time; past it, Load more fetches the next page from
+  // /api/search/more with this same query string. The listing filters are
+  // applied in SQL, so the total is the real number of matches.
   const [result, topResults, filterOptions, stateOptions] = hasQuery
     ? await Promise.all([
-        searchDirectory({ q, treatment, location: effectiveLocation, limit: 100, allowGeocode: true }),
+        searchPageResults(request),
         getTopResults(omniValue),
         getSearchFilterOptions(),
         getLocationFilterOptions(),
@@ -116,7 +121,11 @@ export default async function SearchPage({
             </p>
           ) : (
             <>
-              {total === 0 ? (
+              {/* With listing filters on, a zero still renders the results
+                  block: the filter panel lives there, and hiding it would
+                  leave the visitor no way to clear the filters that emptied
+                  the list. */}
+              {total === 0 && !filtersActive ? (
                 topResults.length === 0 ? (
                   <div className="py-12 text-center">
                     <p className="text-body text-ink-primary font-medium mb-2">No matches found</p>
@@ -138,19 +147,25 @@ export default async function SearchPage({
                 <>
                   <p className="flex flex-wrap items-center gap-2 text-ink-secondary text-sm mb-4">
                     <CountPill count={total} label={total === 1 ? 'result' : 'results'} />
-                    {total >= 100 && <span>Refine your search for more.</span>}
+                    {/* Load more reaches SEARCH_RESULT_CAP; only past that is
+                        refining the one way to see more. */}
+                    {total > SEARCH_RESULT_CAP && <span>Refine your search for more.</span>}
                   </p>
                   {locationText && result.clinics.length > 0 && (
                     <SearchMapSection clinics={result.clinics} />
                   )}
                   <SearchResultsWithFilters
                     clinics={result.clinics}
+                    totalCount={total}
                     brandOptions={filterOptions.brandOptions}
                     serviceOptions={filterOptions.serviceOptions}
                     stateOptions={location ? [] : stateOptions}
-                    query={q}
                     initialState={barState}
                     initialCity={barCity}
+                    searchQuery={usp.toString()}
+                    pageSize={SEARCH_PAGE_SIZE}
+                    resultCap={SEARCH_RESULT_CAP}
+                    filtersActive={filtersActive}
                   />
                 </>
               )}
