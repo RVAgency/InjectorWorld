@@ -28,7 +28,17 @@ const LISTING_FILTER_KEYS = [
  */
 function filterKey(f: ListingFilterValues): string {
   const list = (v: string[]) => [...v].sort().join(',')
-  return [list(f.brands), list(f.services), list(f.clinicTypes), f.rating ?? '', f.radius ?? ''].join('|')
+  // "Any distance" counts: on a ZIP search it lifts the 3-mile limit.
+  const distance = f.radius ?? (f.anyDistance ? 'any' : '')
+  return [list(f.brands), list(f.services), list(f.clinicTypes), f.rating ?? '', distance].join('|')
+}
+
+/** The search itself (query and place), without the panel's filters or paging. */
+function searchIdentity(searchQuery: string): string {
+  const params = new URLSearchParams(searchQuery)
+  LISTING_FILTER_KEYS.forEach((key) => params.delete(key))
+  params.delete('page')
+  return params.toString()
 }
 
 /** If a navigation never lands, stop showing the skeleton after this long. */
@@ -51,6 +61,12 @@ const PENDING_TIMEOUT_MS = 15_000
  * fresh selection. Past the first page, Load more asks /api/search/more for the
  * next page of the same search (same query string, so the same filters).
  *
+ * Distance (2026-09-29): a search with a place of its own (a ZIP, a city, New
+ * York City) hands the panel that place and the radius it already applies, so
+ * the control reads "3 mi" on a ZIP search like the pillar pages, and a picked
+ * Distance is measured from the searched place, not from the visitor. See
+ * SearchParams.distance in lib/search-queries.ts.
+ *
  * `stateOptions` is only ever non-empty when the user hasn't typed a location
  * themselves (the page decides this by checking the raw `location` param,
  * not `state`/`city` -- see app/(frontend)/search/page.tsx). Picking a
@@ -71,6 +87,8 @@ export function SearchResultsWithFilters({
   pageSize,
   resultCap,
   filtersActive,
+  distanceOrigin,
+  appliedRadiusMiles,
 }: {
   /** Page 1 of the search, already filtered on the server. */
   clinics: DirectoryClinic[]
@@ -89,6 +107,13 @@ export function SearchResultsWithFilters({
   resultCap: number
   /** Whether any listing filter is applied to this render. */
   filtersActive: boolean
+  /**
+   * The searched place the panel measures Distance from (2026-09-29), or null
+   * when the search names no place and the panel uses the visitor's location.
+   */
+  distanceOrigin: { lat: number; lng: number } | null
+  /** Radius the list is already cut to, shown in the Distance control. */
+  appliedRadiusMiles: number | null
 }) {
   const router = useRouter()
   // Seeded from the URL (not always '') so the dropdown reflects the current
@@ -239,6 +264,13 @@ export function SearchResultsWithFilters({
         serviceOptions={serviceOptions}
         serverFiltered
         countsPending={pending}
+        // A search with a place measures Distance from it. undefined, not
+        // null, for one without: the panel then looks up the visitor itself,
+        // as every other listing's panel does.
+        geo={distanceOrigin ?? undefined}
+        autoRadius={appliedRadiusMiles}
+        anyDistanceParam
+        distanceResetKey={searchIdentity(searchQuery)}
       />
       <div className="min-w-0 flex-1">
         {stateOptions.length > 0 && (

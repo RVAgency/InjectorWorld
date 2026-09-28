@@ -79,6 +79,10 @@ export default async function SearchPage({
 
   const total = result.clinicTotal
   const zipNotice = 'zipNotice' in result ? result.zipNotice : undefined
+  // Where the panel's Distance is measured from, and the radius the list is
+  // already cut to (2026-09-29). See SearchResult.distanceOrigin.
+  const distanceOrigin = 'distanceOrigin' in result ? (result.distanceOrigin ?? null) : null
+  const appliedRadiusMiles = 'appliedRadiusMiles' in result ? (result.appliedRadiusMiles ?? null) : null
   const treatmentText = result.serviceLabel || treatment
   const brandText = result.brandLabel
   const locationText = result.locationLabel || effectiveLocation
@@ -182,6 +186,8 @@ export default async function SearchPage({
                     pageSize={SEARCH_PAGE_SIZE}
                     resultCap={SEARCH_RESULT_CAP}
                     filtersActive={filtersActive}
+                    distanceOrigin={distanceOrigin}
+                    appliedRadiusMiles={appliedRadiusMiles}
                   />
                 </>
               )}

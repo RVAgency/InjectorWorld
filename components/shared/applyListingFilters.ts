@@ -20,6 +20,14 @@ export type ListingFilterValues = {
    * address bar (docs/ZIP-NEAR-ME-LISTING-2026-09-10.md hard rule 3).
    */
   nearZip?: string | null
+  /**
+   * "Any distance" picked on purpose (2026-09-29, /search only). Distinct from
+   * no Distance at all on a search that limits itself (a ZIP search's 3
+   * miles), where "Any distance" lifts the limit. Travels as `radius=any`, and
+   * only when the panel is told to write it (ListingFilters anyDistanceParam).
+   * Nothing else reads it, so every other listing behaves exactly as before.
+   */
+  anyDistance?: boolean
 }
 
 export type ScoredListingResult<T> = {

@@ -56,7 +56,11 @@ function parseList(value: string | null): string[] {
   return value ? value.split(',').map((v) => v.trim()).filter(Boolean) : []
 }
 
-function parseFilters(params: URLSearchParams, fallbackCoords: { lat: number; lng: number } | null): ListingFilterValues {
+function parseFilters(
+  params: URLSearchParams,
+  fallbackCoords: { lat: number; lng: number } | null,
+  radiusOptions: readonly number[] = RADIUS_OPTIONS,
+): ListingFilterValues {
   const radius = parseNumber(params.get('radius'))
   const rating = parseNumber(params.get('rating'))
   const priceMin = parseNumber(params.get('priceMin'))
@@ -65,7 +69,8 @@ function parseFilters(params: URLSearchParams, fallbackCoords: { lat: number; ln
   const lng = parseNumber(params.get('lng')) ?? fallbackCoords?.lng ?? null
 
   return {
-    radius: radius && RADIUS_OPTIONS.includes(radius) ? radius : null,
+    radius: radius && radiusOptions.includes(radius) ? radius : null,
+    anyDistance: params.get('radius') === 'any',
     rating: rating && [3.5, 4, 4.5].includes(rating) ? rating : null,
     virtual: params.get('virtual') === '1',
     priceMin: priceMin ?? PRICE_MIN,
@@ -158,6 +163,19 @@ type ListingFiltersProps<T> = {
    * pressed and the page's default comes back.
    */
   onDistanceChoice?: (choice: number | null | 'auto') => void
+  /**
+   * Write an explicit "Any distance" to the url as `radius=any` (2026-09-29).
+   * Only /search sets it: there the page reads Distance from the url, and on a
+   * ZIP search "Any distance" has to differ from no choice (which is the ZIP's
+   * 3 miles). The pillar pages keep that choice in onDistanceChoice instead.
+   */
+  anyDistanceParam?: boolean
+  /**
+   * Changes when the page starts a different search. The Distance control then
+   * goes back to showing what the new search applies, instead of an earlier
+   * search's choice (/search keeps this panel mounted across searches).
+   */
+  distanceResetKey?: string
 }
 
 type FilterPanelProps = {
@@ -179,6 +197,8 @@ type FilterPanelProps = {
   serverFiltered: boolean
   countsPending: boolean
   autoRadius: number | null
+  /** Miles the Distance control offers. */
+  radiusOptions: readonly number[]
   /** Called when the visitor moves the Distance control. See section 4.10. */
   onRadiusTouched: () => void
   /** True once the visitor has moved Distance themselves. See section 4.11. */
@@ -215,6 +235,8 @@ function ListingFiltersInner<T>({
   countsPending = false,
   autoRadius = null,
   onDistanceChoice,
+  anyDistanceParam = false,
+  distanceResetKey,
 }: ListingFiltersProps<T>) {
   const router = useRouter()
   const pathname = usePathname()
@@ -258,7 +280,22 @@ function ListingFiltersInner<T>({
         : geoCoords,
     [pageOwnsGeo, geoLat, geoLng, geoCoords],
   )
-  const filters = useMemo(() => parseFilters(searchParams, coords), [searchParams, coords])
+  /**
+   * RADIUS_OPTIONS, plus the page's own radius when it is not one of them
+   * (/search's place-name fallback reaches 60 miles), so the control can show
+   * it rather than fall back to reading "Any distance".
+   */
+  const radiusOptions = useMemo(
+    () =>
+      autoRadius != null && autoRadius > 0 && !RADIUS_OPTIONS.includes(autoRadius)
+        ? [...RADIUS_OPTIONS, autoRadius].sort((a, b) => a - b)
+        : RADIUS_OPTIONS,
+    [autoRadius],
+  )
+  const filters = useMemo(
+    () => parseFilters(searchParams, coords, radiusOptions),
+    [searchParams, coords, radiusOptions],
+  )
   const [draft, setDraft] = useState<ListingFilterValues>(filters)
   const [sheetOpen, setSheetOpen] = useState(false)
 
@@ -301,6 +338,8 @@ function ListingFiltersInner<T>({
    * See docs/LISTING-FIX-PLAN-2026-09-19.md section 4.10.
    */
   const [radiusTouched, setRadiusTouched] = useState(false)
+  // A new search starts with Distance showing what that search applies.
+  useEffect(() => setRadiusTouched(false), [distanceResetKey])
 
   const activeCount = getActiveListingFilterCount(filters)
   const draftActiveCount = getActiveListingFilterCount(draft)
@@ -346,6 +385,7 @@ function ListingFiltersInner<T>({
     FILTER_KEYS.forEach((key) => params.delete(key))
 
     if (next.radius != null) params.set('radius', String(next.radius))
+    else if (anyDistanceParam && next.anyDistance) params.set('radius', 'any')
     if (next.rating != null) params.set('rating', String(next.rating))
     if (next.virtual) params.set('virtual', '1')
     if (next.priceMin !== PRICE_MIN) params.set('priceMin', String(next.priceMin))
@@ -405,6 +445,7 @@ function ListingFiltersInner<T>({
       serverFiltered={serverFiltered}
       countsPending={countsPending}
       autoRadius={autoRadius}
+      radiusOptions={radiusOptions}
       onRadiusTouched={() => setRadiusTouched(true)}
       radiusTouched={radiusTouched}
     />
@@ -459,6 +500,7 @@ function ListingFiltersInner<T>({
               serverFiltered={serverFiltered}
               countsPending={countsPending}
               autoRadius={autoRadius}
+              radiusOptions={radiusOptions}
               onRadiusTouched={() => setRadiusTouched(true)}
               radiusTouched={radiusTouched}
             />
@@ -527,6 +569,7 @@ function FilterPanel({
   serverFiltered,
   countsPending,
   autoRadius,
+  radiusOptions,
   onRadiusTouched,
   radiusTouched,
 }: FilterPanelProps) {
@@ -556,19 +599,29 @@ function FilterPanel({
           // applying. After they touch it, show exactly what they picked, or
           // "Any distance" snaps back to the page's radius and reads as a
           // broken option. See docs/LISTING-FIX-PLAN-2026-09-19.md 4.11.
-          value={radiusTouched ? (draft.radius ?? '') : (draft.radius ?? autoRadius ?? '')}
+          // An "Any distance" carried in the url (radius=any) is shown as
+          // exactly that too.
+          value={
+            radiusTouched || draft.anyDistance
+              ? (draft.radius ?? '')
+              : (draft.radius ?? autoRadius ?? '')
+          }
           disabled={!hasCoords}
           onChange={(e) => {
             // Marks Distance as the visitor's own choice, so an Apply that only
             // changed a rating or a brand no longer reports "Any distance" and
             // silently drops the near-me radius. See section 4.10.
             onRadiusTouched()
-            setDraft({ ...draft, radius: e.target.value ? Number(e.target.value) : null })
+            setDraft({
+              ...draft,
+              radius: e.target.value ? Number(e.target.value) : null,
+              anyDistance: !e.target.value,
+            })
           }}
           className="w-full rounded-lg border border-border bg-surface-canvas px-3 py-2 text-body-sm text-ink-primary disabled:cursor-not-allowed disabled:opacity-50"
         >
           <option value="">Any distance</option>
-          {RADIUS_OPTIONS.map((radius) => (
+          {radiusOptions.map((radius) => (
             <option key={radius} value={radius}>{radius} mi</option>
           ))}
         </select>

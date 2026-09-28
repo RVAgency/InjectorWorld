@@ -228,7 +228,28 @@ export type SearchPageRequest = {
   omniValue: string
   hasQuery: boolean
   filters: SearchListingFilters
+  /**
+   * The panel's Distance, read from the same `radius` param (2026-09-29): miles,
+   * or 'any' for an explicit "Any distance". Measured from the searched place
+   * when the search has one. See SearchParams.distance.
+   */
+  distance?: SearchDistance
   filtersActive: boolean
+}
+
+/** The Distance picked in the /search filter panel. */
+export type SearchDistance = number | 'any'
+
+/** Largest radius /search accepts from the url. Above it the choice is ignored. */
+const MAX_PANEL_RADIUS_MILES = 100
+
+/** A url `radius` as a panel Distance, or undefined when it is missing or junk. */
+function parseSearchDistance(raw: string | null): SearchDistance | undefined {
+  const value = (raw ?? '').trim()
+  if (value === 'any') return 'any'
+  if (!value) return undefined
+  const miles = Number(value)
+  return Number.isFinite(miles) && miles > 0 && miles <= MAX_PANEL_RADIUS_MILES ? miles : undefined
 }
 
 export function readSearchPageRequest(sp: URLSearchParams): SearchPageRequest {
@@ -265,6 +286,7 @@ export function readSearchPageRequest(sp: URLSearchParams): SearchPageRequest {
     lat: parsed.lat,
     lng: parsed.lng,
   }
+  const distance = parseSearchDistance(sp.get('radius'))
 
   return {
     q,
@@ -276,7 +298,11 @@ export function readSearchPageRequest(sp: URLSearchParams): SearchPageRequest {
     omniValue,
     hasQuery,
     filters,
-    filtersActive: hasSearchListingFilters(filters),
+    distance,
+    // A Distance in miles narrows the list, so an empty result offers "Clear
+    // filters" even when no coordinates travelled with it. "Any distance" only
+    // ever widens, so it does not count.
+    filtersActive: hasSearchListingFilters(filters) || typeof distance === 'number',
   }
 }
 
@@ -299,6 +325,9 @@ export function searchPageResults(
     // allowGeocode turns a ZIP / place name into a radius search.
     allowGeocode: true,
     filters: req.filters,
+    distance: req.distance,
+    // Only page 1 renders the filter panel that needs the search's own place.
+    wantDistanceOrigin: page === 1,
     visitorLocation,
   })
 }
@@ -342,6 +371,28 @@ export type SearchParams = {
    */
   visitorLocation?: () => Promise<{ lat: number; lng: number; label: string; zip?: string } | null>
   /**
+   * The Distance picked in the /search filter panel (2026-09-29).
+   *
+   * When the search has a place of its own (a ZIP, New York City, a geocoded
+   * place name, or a city), the Distance is measured from that place and
+   * REPLACES the search's own reach: 10 on a ZIP search widens its 3-mile
+   * default to 10 miles, and 10 on a city search means within 10 miles of the
+   * city instead of clinics named after it. 'any' removes the limit (a ZIP
+   * search still lists the ZIP's own clinics first). Until then the panel's
+   * Distance was always measured from the visitor's IP location and could only
+   * narrow what the search had found, so "botox miami" at 10 miles from a
+   * Houston visitor returned nothing, and 10 miles on a ZIP search stayed at 3.
+   *
+   * A search with no place (a name, a treatment, a state) ignores this and
+   * keeps the panel's own point in `filters`, as it always has.
+   */
+  distance?: SearchDistance
+  /**
+   * Return `distanceOrigin` (the point the panel measures Distance from). Costs
+   * one extra, cached query for a city search, so only page 1 asks for it.
+   */
+  wantDistanceOrigin?: boolean
+  /**
    * Internal: parse the query with exact dictionary matching only, which is
    * how search behaved before spelling tolerance (2026-09-28). searchDirectory
    * sets it itself when a tolerant reading finds nothing.
@@ -366,6 +417,19 @@ export type SearchResult = {
    * ZIP" note from it.
    */
   zipNotice?: { zip: string; zipCount: number; radiusMiles: number }
+  /**
+   * The point the filter panel measures Distance from (2026-09-29): the
+   * search's own place, or the middle of a searched city's clinics. Null when
+   * the search has no place, and the panel then uses the visitor's location.
+   * Only set when `wantDistanceOrigin` was asked for.
+   */
+  distanceOrigin?: { lat: number; lng: number } | null
+  /**
+   * Radius in miles the list is actually limited to (the ZIP ladder's rung,
+   * New York City's 25, a picked Distance), or null for none. The panel shows
+   * it, so it never reads "Any distance" beside a list cut to 3 miles.
+   */
+  appliedRadiusMiles?: number | null
 }
 
 /**
@@ -411,6 +475,68 @@ function mapClinic(c: any, slugMap: Map<string, { citySlug: string; stateSlug: s
 /** Five digits, or nothing: a ZIP is interpolated into SQL as a literal. */
 function safeZip(z: string | undefined | null): string | undefined {
   return typeof z === 'string' && /^\d{5}$/.test(z) ? z : undefined
+}
+
+/**
+ * The middle of a searched city (2026-09-29): the median coordinates of the
+ * published clinics in the city that the search's own location text matches
+ * most often. "houston" also matches South Houston and Houston, MO; the median
+ * of Houston, TX's 454 clinics is the answer. A median, not an average, so one
+ * clinic geocoded to the wrong state cannot drag the point away. Null when no
+ * matching clinic has coordinates.
+ *
+ * Location text only, never the treatment or name, so every search in one city
+ * measures Distance from the same point. About 250ms on staging, so each answer
+ * is kept for an hour, and concurrent callers share one query.
+ */
+const CITY_CENTRE_TTL_MS = 60 * 60 * 1000
+const CITY_CENTRE_MAX = 2000
+const cityCentreCache = new Map<
+  string,
+  { at: number; value: Promise<{ lat: number; lng: number } | null> }
+>()
+
+function cityCentre(
+  pool: any,
+  cityLike: string,
+  stateCode: string | undefined,
+): Promise<{ lat: number; lng: number } | null> {
+  const key = `${cityLike}|${stateCode ?? ''}`
+  const hit = cityCentreCache.get(key)
+  if (hit && Date.now() - hit.at < CITY_CENTRE_TTL_MS) return hit.value
+  const value = pool
+    .query(
+      `WITH m AS (
+         SELECT c.city, c.state, c.latitude::float8 AS lat, c.longitude::float8 AS lng
+         FROM clinics c
+         WHERE c.status = 'published'
+           AND (c.city ILIKE $1 OR c.neighborhood ILIKE $1)
+           AND ($2::text IS NULL OR c.state = $2)
+           AND c.latitude IS NOT NULL AND c.longitude IS NOT NULL
+           AND c.latitude <> 0 AND c.longitude <> 0
+       ), top AS (
+         SELECT city, state FROM m GROUP BY city, state
+         ORDER BY count(*) DESC, city, state LIMIT 1
+       )
+       SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY m.lat) AS lat,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY m.lng) AS lng
+       FROM m JOIN top ON m.city = top.city AND m.state = top.state`,
+      [cityLike, stateCode ?? null],
+    )
+    .then((res: any) => {
+      const row = res.rows[0]
+      const lat = Number(row?.lat)
+      const lng = Number(row?.lng)
+      return row?.lat != null && Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null
+    })
+  // A failure is never cached: the next search asks again.
+  value.catch(() => cityCentreCache.delete(key))
+  if (cityCentreCache.size >= CITY_CENTRE_MAX) {
+    const oldest = cityCentreCache.keys().next().value
+    if (oldest !== undefined) cityCentreCache.delete(oldest)
+  }
+  cityCentreCache.set(key, { at: Date.now(), value })
+  return value
 }
 
 /**
@@ -539,7 +665,20 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
   const limit = Math.min(Math.max(1, params.limit ?? 24), 100)
   const allowGeocode = params.allowGeocode ?? false
   const filters = sanitizeListingFilters(params.filters)
-  const filtersActive = hasSearchListingFilters(filters)
+  // The panel's Distance (see SearchParams.distance), checked like everything
+  // else that reaches SQL as a literal.
+  const pick: SearchDistance | undefined =
+    params.distance === 'any'
+      ? 'any'
+      : typeof params.distance === 'number' &&
+          Number.isFinite(params.distance) &&
+          params.distance > 0 &&
+          params.distance <= MAX_PANEL_RADIUS_MILES
+        ? params.distance
+        : undefined
+  // A Distance in miles narrows the list like any other filter, whether or not
+  // the panel's coordinates came with it.
+  const filtersActive = hasSearchListingFilters(filters) || typeof pick === 'number'
 
   // One-time PostGIS check. PostGIS is confirmed unavailable (not just
   // uninstalled) on the production DigitalOcean cluster, so geo search no
@@ -556,6 +695,22 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
   // or the visitor's own for "near me"). With no radius passed in, such a search
   // runs ZIP first on ZIP_SEARCH_RADIUS_LADDER instead of a flat 25 miles.
   let zipCenter: string | undefined
+  // "Any distance" picked on a search with a place: no radius at all.
+  let radiusUnbounded = false
+
+  /** The picked Distance replaces whatever radius the search chose for itself. */
+  function applyPickedDistance() {
+    if (pick === 'any') radiusUnbounded = true
+    else if (pick !== undefined) {
+      radiusUnbounded = false
+      radiusMeters = pick * METERS_PER_MILE
+    }
+  }
+
+  /** True when the search has its own place and the visitor picked a Distance. */
+  function distanceFromPlace(): boolean {
+    return hasGeo && pick !== undefined
+  }
 
   const empty: SearchResult = {
     clinics: [],
@@ -753,10 +908,17 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     }
   }
 
-  // A ZIP-centred search with no radius passed in starts at the first rung.
+  // A ZIP-centred search with no radius passed in lists the ZIP's own clinics
+  // first, and starts at the first rung of the ladder.
   zipCenter = safeZip(zipCenter)
-  const zipLadder = !!zipCenter && params.radiusMiles == null
-  if (zipLadder) radiusMeters = ZIP_SEARCH_RADIUS_LADDER[0] * METERS_PER_MILE
+  const zipFirst = !!zipCenter && params.radiusMiles == null
+  if (zipFirst) radiusMeters = ZIP_SEARCH_RADIUS_LADDER[0] * METERS_PER_MILE
+  // A Distance picked in the panel is measured from this place and replaces
+  // the radius chosen above (the ZIP's rung, New York City's 25).
+  if (distanceFromPlace()) applyPickedDistance()
+  // Only the automatic radius climbs the ladder. A picked Distance is final:
+  // an empty result under it is a real "no clinics within N miles".
+  const zipLadder = zipFirst && pick === undefined
 
   let tsquery = freeText ? toPrefixTsQuery(freeText) : ''
 
@@ -766,7 +928,10 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
   // Radius WHERE clause + distance expression, picking PostGIS (indexed) when
   // available or the Haversine fallback (search-sql.ts) when it is not. Shared
   // by providerCandidates/clinicCandidates so the two never drift apart.
-  function geoSql(alias: string): { whereClause: string | null; distExpr: string } {
+  function geoSql(
+    alias: string,
+    opts: { unbounded?: boolean } = {},
+  ): { whereClause: string | null; distExpr: string } {
     if (!hasGeo) return { whereClause: null, distExpr: 'NULL' }
     const a = alias ? `${alias}.` : ''
 
@@ -792,11 +957,23 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     // The ZIP half is boxed like the near-me listing's, so it stays on the
     // latitude index; an unbounded "OR zip = X" scans the whole table. zipCenter
     // is five digits (safeZip), so it is safe as a literal.
-    // Without a ZIP the clause is exactly what it always was.
+    // Without a ZIP the clause is exactly what it always was. A picked Distance
+    // keeps the ZIP's own clinics too: the visitor searched for that ZIP.
     const withZip = (radiusClause: string) =>
-      zipLadder
+      zipFirst
         ? `(${radiusClause} OR (${clinicBoundingBoxSql(lat!, lng!, NEAR_ME_ZIP_REACH_MILES, alias)} AND ${a}zip = '${zipCenter}'))`
         : radiusClause
+
+    // No radius: "Any distance" picked, or the caller asking whether the search
+    // matches anything at all (unfilteredMatchExists). Distance still ranks.
+    if (radiusUnbounded || opts.unbounded) {
+      return {
+        whereClause: `(${hasCoords})`,
+        distExpr: geoEnabled
+          ? clinicDistanceMeters(lat!, lng!, alias)
+          : clinicDistanceMetersHaversine(lat!, lng!, alias),
+      }
+    }
 
     if (geoEnabled) {
       return {
@@ -862,7 +1039,8 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     // case-insensitive, so the comparison itself is unchanged. Same fix the
     // suggest route made for clinic_name on 2026-08-17.
     if (cityLike) where.push(`(c.city ILIKE ${bind(cityLike)} OR c.neighborhood ILIKE ${bind(cityLike)})`)
-    const clinicGeo = geoSql('c')
+    // Without the filters, a picked Distance is left out too: it is one of them.
+    const clinicGeo = geoSql('c', { unbounded: !applyFilters && distanceFromPlace() })
     if (clinicGeo.whereClause) where.push(clinicGeo.whereClause)
     if (applyFilters && filtersActive) {
       // Same SQL as fetchLeanClinics (lib/lean-clinic-listing.ts), so a filter
@@ -891,10 +1069,11 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
         where.push(`c.aggregate_rating >= ${bind(filters.minRating)}`)
       }
       const { radiusMiles: fRadius, lat: fLat, lng: fLng } = filters
-      if (fRadius != null && fLat != null && fLng != null) {
+      if (fRadius != null && fLat != null && fLng != null && !distanceFromPlace()) {
         // The visitor's Distance choice, around the point the panel wrote to
-        // the url. Independent of any search centre above: a ZIP search keeps
-        // its own radius and this narrows it further. Box first (indexed
+        // the url, for a search with no place of its own (a name, a
+        // treatment, a state). A search WITH a place measures the same choice
+        // from that place instead, in geoSql (2026-09-29). Box first (indexed
         // columns), exact distance second. lat/lng/radius are numbers checked
         // by sanitizeListingFilters, so interpolating them is safe, which is
         // the same contract the helpers in search-sql.ts document.
@@ -940,8 +1119,9 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     zipTotal: number
   }> {
     const { params, whereSql, distExpr, rankExpr } = candidateWhere(true)
-    // ZIP-centred: the ZIP's own clinics first (2026-09-28). A literal, see safeZip.
-    const zipExpr = zipLadder ? `(c.zip = '${zipCenter}')` : null
+    // ZIP-centred: the ZIP's own clinics first (2026-09-28), under a picked
+    // Distance as well. A literal, see safeZip.
+    const zipExpr = zipFirst ? `(c.zip = '${zipCenter}')` : null
 
     // Two candidate strategies.
     //
@@ -1047,6 +1227,33 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     return { clinics, clinicTotal, zipTotal }
   }
 
+  // ── City: the point Distance is measured from ────────────────────────────
+  // Started now and left running beside the search. The panel needs it on
+  // page 1, and a picked Distance in miles needs it to run at all.
+  const cityCentreFor = cityLike
+  const cityCentreP =
+    cityLike && !hasGeo && (params.wantDistanceOrigin || typeof pick === 'number')
+      ? cityCentre(pool, cityLike, stateCode).catch(() => null)
+      : null
+
+  // City search with a Distance in miles: within that many miles of the city's
+  // middle, instead of clinics whose city is named like it, so 25 miles around
+  // Houston reaches Sugar Land and Katy. Only when the location reading matches
+  // on its own: a place word that was really part of a clinic's name ("Ada
+  // West Dermatology") must still reach the name rescue below, which needs the
+  // reading untouched.
+  if (typeof pick === 'number' && cityCentreP && (await unfilteredMatchExists())) {
+    const centre = await cityCentreP
+    if (centre) {
+      lat = centre.lat
+      lng = centre.lng
+      hasGeo = true
+      applyPickedDistance()
+      cityLike = undefined
+      stateCode = undefined
+    }
+  }
+
   let pass = await runPass()
 
   // ── ZIP ladder ───────────────────────────────────────────────────────────
@@ -1131,6 +1338,8 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
       lng = hit.lng
       hasGeo = true
       radiusMeters = (params.radiusMiles ?? FALLBACK_RADIUS_MILES) * METERS_PER_MILE
+      // A picked Distance is measured from the place just found.
+      if (distanceFromPlace()) applyPickedDistance()
       tsquery = '' // it was a place, not a name
       locationLabel = hit.label
       pass = await runPass()
@@ -1156,6 +1365,17 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     return searchDirectory({ ...params, exactParse: true })
   }
 
+  // Where the panel measures Distance from: the search's own point, else the
+  // middle of the searched city (only while the city reading still stands; the
+  // name rescue drops it), else nowhere and the panel uses the visitor's.
+  const distanceOrigin = !params.wantDistanceOrigin
+    ? undefined
+    : hasGeo
+      ? { lat: lat!, lng: lng! }
+      : cityLike && cityLike === cityCentreFor && cityCentreP
+        ? await cityCentreP
+        : null
+
   return {
     clinics: pass.clinics,
     serviceLabel: treatmentLabel,
@@ -1165,7 +1385,7 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     page,
     limit,
     center: hasGeo ? { lat: lat!, lng: lng! } : null,
-    ...(zipLadder && zipCenter
+    ...(zipFirst && zipCenter && !radiusUnbounded
       ? {
           zipNotice: {
             zip: zipCenter,
@@ -1174,6 +1394,9 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
           },
         }
       : {}),
+    ...(distanceOrigin !== undefined ? { distanceOrigin } : {}),
+    appliedRadiusMiles:
+      hasGeo && !radiusUnbounded ? Math.round(radiusMeters / METERS_PER_MILE) : null,
   }
 }
 
