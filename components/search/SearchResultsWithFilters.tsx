@@ -119,6 +119,12 @@ export function SearchResultsWithFilters({
       firstRender.current = false
       return
     }
+    // The dropdown follows the url of the render that just landed. Seeding
+    // useState from the url only covered the first mount: after browser Back
+    // from ?state=TX the list was national again while the dropdown still read
+    // "Texas" (seen live on staging and production, 2026-09-28).
+    setSelectedState(initialState)
+    setSelectedCity(initialCity)
     generation.current += 1
     setExtra([])
     setNextPage(2)
