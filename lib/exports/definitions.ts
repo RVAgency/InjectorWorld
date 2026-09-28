@@ -105,6 +105,215 @@ const CLINIC_SELECT = `
   c.created_at
 `
 
+// ─── Guides & News: full content audit (2026-09-28) ─────────────────────────
+//
+// Was four columns (title, url, category, published) over approved rows only.
+// The IW client team asked for everything the admin's Content indexing panel
+// shows per article, with the character length of every text value next to it
+// ("Title Length (chars)", "URL Length (chars)", ...). One definition serves
+// both collections so the two sheets can never drift apart.
+//
+// Every row, not only approved ones: like the FAQs export, this is an audit
+// list, and "Review Status" / "Live on Site" say which rows are public.
+
+/** Admin wording for page_index.index_mode, same as the Indexing screens. */
+const INDEX_LABEL: Record<string, string> = {
+  queued: 'Not submitted',
+  indexed: 'Submitted to Google',
+  excluded: 'Never submit',
+}
+
+/** Plain text of a Lexical rich-text document, for the word and character counts. */
+function lexicalPlainText(node: any): string {
+  if (!node || typeof node !== 'object') return ''
+  if (typeof node.text === 'string') return node.text
+  const kids = Array.isArray(node.children) ? node.children : node.root ? [node.root] : []
+  return kids
+    .map(lexicalPlainText)
+    .join(node.type === 'root' || node.type === 'list' ? '\n' : node.children ? ' ' : '')
+}
+
+const ymd = (v: unknown) => (v ? new Date(v as string).toISOString().slice(0, 10) : '')
+const yesNo = (b: unknown) => (b ? 'Yes' : 'No')
+const jsonCount = (v: unknown) => (Array.isArray(v) ? v.length : 0)
+
+/**
+ * Columns the founder took out of each sheet by hand after the first version
+ * (2026-09-28) and asked to leave out of the export as well. The two lists
+ * differ on purpose: they mirror the approved sheets exactly.
+ */
+const CONTENT_EXPORT_OMIT: Record<'guides' | 'news', Set<string>> = {
+  guides: new Set([
+    'Author Length (chars)',
+    'Medical Reviewer',
+    'Medical Reviewer Length (chars)',
+    'Related Service',
+    'Related Service Length (chars)',
+    'Import Batch',
+  ]),
+  news: new Set([
+    'Internal Links Count',
+    'Schema',
+    'In Sitemap',
+    'Index Batch',
+    'Submitted to Google On',
+    'Import Batch',
+    'Import Batch Length (chars)',
+    'Admin Edit Link',
+  ]),
+}
+
+function contentExport(table: 'guides' | 'news'): ExportDefinition {
+  const isGuide = table === 'guides'
+  const omit = CONTENT_EXPORT_OMIT[table]
+  const columns: ExportColumn[] = []
+  // Text columns listed here get a "<header> Length (chars)" column right after them.
+  const lengthKeys: string[] = []
+  const add = (header: string, key: string, width: number, withLength = false) => {
+    if (!omit.has(header)) columns.push({ header, key, width })
+    const lengthHeader = `${header} Length (chars)`
+    if (withLength && !omit.has(lengthHeader)) {
+      columns.push({ header: lengthHeader, key: `${key}Len`, width: 12 })
+      lengthKeys.push(key)
+    }
+  }
+  add('ID', 'id', 7)
+  add('Title', 'title', 50, true)
+  add('URL', 'url', 60, true)
+  add('Slug', 'slug', 40, true)
+  add('Category', 'category', 18, true)
+  add('Status', 'status', 11)
+  add('Review Status', 'reviewStatus', 13)
+  add('Live on Site', 'live', 10)
+  add('Hero Image on Page', 'hero', 11)
+  add('Hero Image Source', 'heroSource', 16)
+  add('Hero Image URL', 'heroUrl', 60, true)
+  add('Hero Image Alt Text', 'heroAlt', 30, true)
+  add('Share (OG) Image Set', 'ogImage', 12)
+  add('Meta Title (as used on page)', 'metaTitle', 50, true)
+  add('Meta Title Stored', 'metaTitleStored', 10)
+  add('Meta Description', 'metaDescription', 60, true)
+  add('Excerpt', 'excerpt', 50, true)
+  if (isGuide) add('Lede (hero subhead)', 'lede', 50, true)
+  add('Answer Snippet', 'answerSnippet', 50, true)
+  add('Focus Keyword', 'focusKeyword', 22, true)
+  add('Author', 'author', 22, true)
+  add('Medical Reviewer', 'reviewer', 26, true)
+  add('Related Service', 'relatedService', 22, true)
+  add('Body Word Count', 'bodyWords', 11)
+  add('Body Character Count', 'bodyChars', 11)
+  if (isGuide) add('Read Time (min)', 'readTime', 10)
+  add('FAQ Count', 'faqCount', 9)
+  add('Sources Count', 'sourcesCount', 9)
+  add('Internal Links Count', 'linksCount', 10)
+  add('Schema', 'schema', 34)
+  add('Google Index Status', 'indexStatus', 18)
+  add('Robots Tag Now', 'robots', 16)
+  add('In Sitemap', 'inSitemap', 10)
+  add('Index Batch', 'batch', 22)
+  add('Submitted to Google On', 'submittedOn', 14)
+  add('Uploaded', 'uploaded', 12)
+  add('Published', 'published', 12)
+  if (isGuide) add('Updated (shown on page)', 'contentUpdated', 13)
+  add('Last Edited in Admin', 'edited', 13)
+  add('Featured', 'featured', 9)
+  add('Nofollow', 'nofollow', 9)
+  add('Import Batch', 'importBatch', 26, true)
+  add('Admin Edit Link', 'adminUrl', 60)
+
+  // `table` is one of two literals above, never user input, so interpolating it
+  // (and the page_index source_collection, which is the same name) is safe.
+  const guideOnly = isGuide
+    ? 'c.lede, c.read_time_min, c.sources_count, c.content_updated_at'
+    : 'NULL::text AS lede, NULL::numeric AS read_time_min, NULL::numeric AS sources_count, NULL::timestamptz AS content_updated_at'
+
+  return {
+    label: isGuide ? 'Guides' : 'News',
+    sheet: isGuide ? 'Guides' : 'News',
+    supportsFilters: false,
+    columns,
+    buildCount: () => ({ text: `SELECT COUNT(*)::int AS n FROM ${table}`, values: [] }),
+    buildPage: (_f, lastId, limit) => ({
+      text: `SELECT c.id, c.title, c.slug, c.category::text AS category, c.status::text AS status,
+                    c.review_status::text AS review_status, c.excerpt, c.answer_snippet, c.focus_keyword,
+                    c.meta_title, c.meta_description, c.meta_image_id, c.cover_image_url, c.featured,
+                    c.nofollow, c.import_batch, c.created_at, c.published_at, c.updated_at,
+                    c.body, c.faq, c.sources, c.internal_links, ${guideOnly},
+                    m.url AS cover_upload_url, m.alt AS cover_alt,
+                    a.full_name AS author, r.full_name AS reviewer, r.credentials::text AS reviewer_credentials,
+                    s.name AS related_service,
+                    pi.path, pi.index_mode::text AS index_mode, COALESCE(pi.indexed, false) AS indexed,
+                    COALESCE(pi.publishable, false) AS publishable, pi.indexed_at, pi.batch_label
+             FROM ${table} c
+             LEFT JOIN media m ON m.id = c.cover_image_id
+             LEFT JOIN authors a ON a.id = c.author_id
+             LEFT JOIN medical_reviewers r ON r.id = c.medical_reviewer_id
+             LEFT JOIN services s ON s.id = c.related_service_id
+             LEFT JOIN page_index pi ON pi.source_collection = '${table}' AND pi.source_id = c.id::text
+             WHERE c.id > $1 ORDER BY c.id LIMIT $2`,
+      values: [lastId, limit],
+    }),
+    mapRow: (r, siteUrl) => {
+      // Same rule the guide and news pages use for their hero: the uploaded
+      // image first, then the url field (lib/guide-queries.ts, news-queries.ts).
+      const heroUrl = r.cover_upload_url || r.cover_image_url || ''
+      const body = lexicalPlainText(r.body).replace(/\s+/g, ' ').trim()
+      const row: Record<string, unknown> = {
+        id: r.id,
+        title: r.title ?? '',
+        url: `${siteUrl}${r.path || `/${table}/${r.slug}`}`,
+        slug: r.slug ?? '',
+        category: r.category ?? '',
+        status: r.status ?? '',
+        reviewStatus: r.review_status ?? '',
+        live: yesNo(r.publishable),
+        hero: yesNo(heroUrl),
+        heroSource: r.cover_upload_url ? 'Uploaded image' : r.cover_image_url ? 'Image URL field' : 'None',
+        heroUrl,
+        heroAlt: r.cover_alt ?? '',
+        ogImage: yesNo(r.meta_image_id || heroUrl),
+        // The page falls back to the title when no meta title is stored, and
+        // the Content indexing panel shows the same (lib/content-index/queries.ts).
+        metaTitle: r.meta_title || r.title || '',
+        metaTitleStored: yesNo(r.meta_title),
+        metaDescription: r.meta_description ?? '',
+        excerpt: r.excerpt ?? '',
+        lede: r.lede ?? '',
+        answerSnippet: r.answer_snippet ?? '',
+        focusKeyword: r.focus_keyword ?? '',
+        author: r.author ?? '',
+        reviewer: r.reviewer ? `${r.reviewer}${r.reviewer_credentials ? `, ${r.reviewer_credentials}` : ''}` : '',
+        relatedService: r.related_service ?? '',
+        bodyWords: body ? body.split(' ').length : 0,
+        bodyChars: body.length,
+        readTime: r.read_time_min != null ? Number(r.read_time_min) : '',
+        faqCount: jsonCount(r.faq),
+        sourcesCount: jsonCount(r.sources) || Number(r.sources_count) || 0,
+        linksCount: jsonCount(r.internal_links),
+        schema: isGuide ? 'MedicalWebPage + Article + FAQPage' : 'Article',
+        indexStatus: r.index_mode
+          ? r.indexed ? 'Submitted to Google' : INDEX_LABEL[r.index_mode] ?? r.index_mode
+          : 'No url built',
+        // Matches getEntityRobots(): only indexed rows are indexable.
+        robots: r.indexed ? 'index, follow' : 'noindex, follow',
+        inSitemap: yesNo(r.indexed),
+        batch: r.batch_label ?? '',
+        submittedOn: ymd(r.indexed_at),
+        uploaded: ymd(r.created_at),
+        published: ymd(r.published_at),
+        contentUpdated: ymd(r.content_updated_at),
+        edited: ymd(r.updated_at),
+        featured: yesNo(r.featured),
+        nofollow: yesNo(r.nofollow),
+        importBatch: r.import_batch ?? '',
+        adminUrl: `${siteUrl}/admin/collections/${table}/${r.id}`,
+      }
+      for (const k of lengthKeys) row[`${k}Len`] = String(row[k] ?? '').length
+      return row
+    },
+  }
+}
+
 export const EXPORT_DEFINITIONS: Record<string, ExportDefinition> = {
   clinics: {
     label: 'Clinics',
@@ -409,54 +618,9 @@ export const EXPORT_DEFINITIONS: Record<string, ExportDefinition> = {
     }),
   },
 
-  guides: {
-    label: 'Guides',
-    sheet: 'Guides',
-    supportsFilters: false,
-    columns: [
-      { header: 'Title', key: 'title', width: 45 },
-      { header: 'URL', key: 'url', width: 55 },
-      { header: 'Category', key: 'category', width: 20 },
-      { header: 'Published At', key: 'publishedAt', width: 16 },
-    ],
-    // Gate is reviewStatus, not the admin "status" field — see lib/guide-queries.ts.
-    buildCount: () => ({ text: `SELECT COUNT(*)::int AS n FROM guides WHERE review_status = 'approved'`, values: [] }),
-    buildPage: (_f, lastId, limit) => ({
-      text: `SELECT id, title, slug, category, published_at FROM guides
-             WHERE review_status = 'approved' AND id > $1 ORDER BY id LIMIT $2`,
-      values: [lastId, limit],
-    }),
-    mapRow: (r, siteUrl) => ({
-      title: r.title ?? '',
-      url: `${siteUrl}/guides/${r.slug}`,
-      category: r.category ?? '',
-      publishedAt: r.published_at ? new Date(r.published_at).toISOString().slice(0, 10) : '',
-    }),
-  },
-
-  news: {
-    label: 'News',
-    sheet: 'News',
-    supportsFilters: false,
-    columns: [
-      { header: 'Title', key: 'title', width: 45 },
-      { header: 'URL', key: 'url', width: 55 },
-      { header: 'Category', key: 'category', width: 20 },
-      { header: 'Published At', key: 'publishedAt', width: 16 },
-    ],
-    buildCount: () => ({ text: `SELECT COUNT(*)::int AS n FROM news WHERE review_status = 'approved'`, values: [] }),
-    buildPage: (_f, lastId, limit) => ({
-      text: `SELECT id, title, slug, category, published_at FROM news
-             WHERE review_status = 'approved' AND id > $1 ORDER BY id LIMIT $2`,
-      values: [lastId, limit],
-    }),
-    mapRow: (r, siteUrl) => ({
-      title: r.title ?? '',
-      url: `${siteUrl}/news/${r.slug}`,
-      category: r.category ?? '',
-      publishedAt: r.published_at ? new Date(r.published_at).toISOString().slice(0, 10) : '',
-    }),
-  },
+  // Full content audit, same columns for both. See contentExport above.
+  guides: contentExport('guides'),
+  news: contentExport('news'),
 
   faqs: {
     label: 'FAQs',
