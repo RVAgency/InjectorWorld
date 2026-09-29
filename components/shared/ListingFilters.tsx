@@ -19,7 +19,9 @@ type FilterOption = { id: string; name: string }
 
 // Must contain every rung of NEAR_ME_RADIUS_LADDER (lib/merit.ts), or the
 // Distance control cannot show the radius the near-me listing is applying.
-const RADIUS_OPTIONS = [3, 5, 10, 25, 50]
+// 1 and 2 miles added 2026-09-29 (founder). The servers already accept any
+// radius, so only this list changed; the near-me default is still 3.
+const RADIUS_OPTIONS = [1, 2, 3, 5, 10, 25, 50]
 const RATING_OPTIONS = [
   { value: null, label: 'All' },
   { value: 4.5, label: '4.5+' },
