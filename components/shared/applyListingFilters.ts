@@ -28,6 +28,12 @@ export type ListingFilterValues = {
    * Nothing else reads it, so every other listing behaves exactly as before.
    */
   anyDistance?: boolean
+  /**
+   * Nearest first from lat/lng, with no radius (2026-09-29). Set ONLY by
+   * withNearMeDefault once the near-me ladder is exhausted; travels to the
+   * listing API as `sort=nearest`, never into the page url.
+   */
+  nearestFirst?: boolean
 }
 
 export type ScoredListingResult<T> = {
@@ -208,14 +214,35 @@ export function withNearMeDefault(
     radius: number | null
     /** The visitor's ZIP. Its clinics lead the automatic near-me list. */
     zip?: string | null
+    /**
+     * Every rung of the ladder came back empty (not "Any distance" picked by
+     * the visitor). The list is then the nearest clinics, however far.
+     */
+    exhausted?: boolean
   },
 ): ListingFilterValues {
   if (!near.enabled || !near.ready) return filters
   if (near.lat == null || near.lng == null) return filters
-  if (filters.radius != null) return filters
-  // Ladder exhausted: keep the visitor's point as the SORT origin so the
-  // national list still opens with their own area, but stop filtering by a
-  // radius that matched nothing.
+  if (filters.radius != null) {
+    // A Distance the visitor picked (2026-09-29). Measured from their own ZIP
+    // centre (the panel's point on a pillar page), so the ZIP's clinics still
+    // lead and the "N clinics in 77098" line stays, as on /search. It used to
+    // vanish the moment any Distance was picked, and did not come back even
+    // on 3 mi. Only when the point really is that ZIP's centre.
+    const atZipCentre =
+      filters.lat != null &&
+      filters.lng != null &&
+      Math.abs(filters.lat - near.lat) < 1e-3 &&
+      Math.abs(filters.lng - near.lng) < 1e-3
+    return near.zip && atZipCentre ? { ...filters, nearZip: near.zip } : filters
+  }
+  // Ladder exhausted: the nearest clinics, however far, nearest first
+  // (2026-09-29). Was the national top list, sorted by distance bands that end
+  // at 100 miles, so a Houston visitor with no Bellafill clinic inside 50 miles
+  // was shown New York and California first.
+  if (near.radius == null && near.exhausted) return { ...filters, lat: near.lat, lng: near.lng, nearestFirst: true }
+  // "Any distance" picked: the visitor's point stays the SORT origin, so the
+  // national list opens with their own area.
   if (near.radius == null) return { ...filters, lat: near.lat, lng: near.lng }
   return { ...filters, lat: near.lat, lng: near.lng, radius: near.radius, nearZip: near.zip ?? null }
 }
@@ -256,6 +283,9 @@ export function toServerFilterParams(filters: ListingFilterValues): URLSearchPar
       // the ZIP's clinics lead and are kept past the radius. This goes to the
       // listing API, never into the page url.
       if (filters.nearZip && /^\d{5}$/.test(filters.nearZip)) params.set('zip', filters.nearZip)
+    } else if (filters.nearestFirst) {
+      // Near-me with an exhausted ladder: nearest first, no radius.
+      params.set('sort', 'nearest')
     }
   }
   return params

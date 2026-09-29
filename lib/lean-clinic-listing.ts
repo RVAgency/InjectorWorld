@@ -116,6 +116,15 @@ export type LeanListingFilters = {
    * checked in parseLeanListingFilters and again in fetchLeanClinics.
    */
   nearZip?: string
+  /**
+   * Order by pure distance from `near`, nearest first, with no limit and a
+   * distance on every row (2026-09-29, `sort=nearest`). For the near-me listing
+   * whose whole ladder came back empty: a Houston visitor looking at a brand
+   * with no clinic inside 50 miles now gets the nearest ones (Texas first)
+   * instead of the national top list. Ignored with a radius, which already
+   * sorts by distance.
+   */
+  nearestFirst?: boolean
 }
 
 /** The clinic_type values the Clinics collection allows. Anything else in the
@@ -170,6 +179,11 @@ export function parseLeanListingFilters(searchParams: URLSearchParams): LeanList
     ...(hasGeo ? { radiusMiles: radius, lat, lng } : {}),
     ...(hasPoint ? { near: { lat, lng } } : {}),
     ...(hasGeo && /^\d{5}$/.test(zip) ? { nearZip: zip } : {}),
+    // Both coordinates must really be there: a missing one reads as 0 above.
+    ...(hasPoint && !hasGeo && searchParams.has('lat') && searchParams.has('lng') &&
+    searchParams.get('sort') === 'nearest'
+      ? { nearestFirst: true }
+      : {}),
   }
 }
 
@@ -216,6 +230,8 @@ export async function fetchLeanClinics(
      * NEAR_ME_ZIP_REACH_MILES from the point).
      */
     nearZip?: string
+    /** Pure distance order from `near`, see LeanListingFilters.nearestFirst. */
+    nearestFirst?: boolean
     /**
      * Also return the /clinics hero stats for the matched set (2026-09-28):
      * distinct states and average rating, from the same count query and with
@@ -336,14 +352,24 @@ export async function fetchLeanClinics(
     // NEAR_MAX_MILES. Clamping keeps those corner rows in the last real band
     // instead of inventing bands beyond the cutoff.
     const maxBucket = Math.floor(NEAR_MAX_MILES / NEAR_BUCKET_MILES)
-    geoSelect = `,
+    // nearestFirst: every locatable clinic gets its distance, however far, and
+    // the list is nearest first (see LeanListingFilters.nearestFirst). Only the
+    // near-me listing asks for it, and only once its whole ladder was empty.
+    const nearest = Boolean(opts.nearestFirst) && opts.radiusMiles == null
+    geoSelect = nearest
+      ? `,
+             0 AS geo_rank,
+             CASE WHEN c.latitude IS NOT NULL AND c.longitude IS NOT NULL
+                       AND c.latitude <> 0 AND c.longitude <> 0
+                  THEN ${distExpr} / ${METERS_PER_MILE} ELSE NULL END AS distance_miles`
+      : `,
              CASE WHEN ${inBox} THEN LEAST(floor(${distExpr} / ${bucketMeters}), ${maxBucket})
                   ELSE ${FAR_BUCKET} END AS geo_rank,
              CASE WHEN ${inBox} THEN ${distExpr} / ${METERS_PER_MILE}
                   ELSE NULL END AS distance_miles`
     // Postgres allows ORDER BY on an output column alias, so the CASE is
     // evaluated once per row rather than twice.
-    if (opts.radiusMiles != null) {
+    if (opts.radiusMiles != null || nearest) {
       /**
        * A radius means the set is already local, so order by the distance
        * itself, nearest first (2026-09-11, founder call). Bands at any width

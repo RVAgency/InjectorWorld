@@ -4,6 +4,9 @@ import { useState } from 'react'
 import { NEAR_ME_RADIUS_LADDER } from '@/lib/merit'
 import type { NearMeState } from './useNearMe'
 
+/** "1 mile", "3 miles": the Distance control has offered 1 mile since 2026-09-29. */
+const milesText = (miles: number | null | undefined) => `${miles} ${miles === 1 ? 'mile' : 'miles'}`
+
 /**
  * Heading + count + ZIP changer for the three pillar listings (2026-09-10).
  *
@@ -133,23 +136,27 @@ export function NearMeHeader({
       </div>
 
       {/* 2026-09-28: the visitor's ZIP leads the list. When it has no clinic
-          of its own, say so, and say how far the list reaches instead. */}
+          of its own, say so, and say how far the list reaches instead. Since
+          2026-09-29 also under a Distance the visitor picked themselves. */}
       {located && typeof total === 'number' && (
         <p className="mt-2 text-body-sm text-ink-secondary">
-          {typeof zipCount === 'number' && zipCount === 0
-            ? `No clinics in ${near.zip}. Showing ${total.toLocaleString()} ${total === 1 ? 'clinic' : 'clinics'} within ${radiusMiles} miles.`
-            : typeof zipCount === 'number' && zipCount > 0
-              ? `${zipCount.toLocaleString()} ${zipCount === 1 ? 'clinic' : 'clinics'} in ${near.zip}, plus nearby within ${radiusMiles} miles (${total.toLocaleString()} total)`
-              : `${total.toLocaleString()} ${total === 1 ? 'clinic' : 'clinics'} within ${radiusMiles} miles`}
+          {total === 0
+            ? `No clinics within ${milesText(radiusMiles)} of ${near.zip}.`
+            : typeof zipCount === 'number' && zipCount === 0
+              ? `No clinics in ${near.zip}. Showing ${total.toLocaleString()} ${total === 1 ? 'clinic' : 'clinics'} within ${milesText(radiusMiles)}.`
+              : typeof zipCount === 'number' && zipCount > 0
+                ? `${zipCount.toLocaleString()} ${zipCount === 1 ? 'clinic' : 'clinics'} in ${near.zip}, plus nearby within ${milesText(radiusMiles)} (${total.toLocaleString()} total)`
+                : `${total.toLocaleString()} ${total === 1 ? 'clinic' : 'clinics'} within ${milesText(radiusMiles)}`}
         </p>
       )}
 
-      {/* Ladder exhausted. Founder decision D1: say so plainly and show the
-          national list, rather than an empty grid. */}
+      {/* Ladder exhausted. Founder decision D1: say so plainly rather than show
+          an empty grid. Since 2026-09-29 the list is the nearest clinics,
+          however far (Texas first for a Houston ZIP), not the national top. */}
       {noneNearby && (
         <p className="mt-2 text-body-sm text-ink-secondary">
           No clinics within {NEAR_ME_RADIUS_LADDER[NEAR_ME_RADIUS_LADDER.length - 1]} miles of{' '}
-          {placeLabel}. Showing top clinics across the US.
+          {placeLabel}. Showing the nearest clinics instead.
         </p>
       )}
 

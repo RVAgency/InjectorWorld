@@ -167,8 +167,8 @@ export default async function SearchPage({
                   {zipNotice && total > 0 && (
                     <p className="text-body-sm text-ink-secondary mb-4">
                       {zipNotice.zipCount === 0
-                        ? `No clinics in ${zipNotice.zip}. Showing ${total.toLocaleString()} ${total === 1 ? 'clinic' : 'clinics'} within ${zipNotice.radiusMiles} miles.`
-                        : `${zipNotice.zipCount.toLocaleString()} ${zipNotice.zipCount === 1 ? 'clinic' : 'clinics'} in ${zipNotice.zip}, plus nearby within ${zipNotice.radiusMiles} miles (${total.toLocaleString()} total)`}
+                        ? `No clinics in ${zipNotice.zip}. Showing ${total.toLocaleString()} ${total === 1 ? 'clinic' : 'clinics'} within ${zipNotice.radiusMiles} ${zipNotice.radiusMiles === 1 ? 'mile' : 'miles'}.`
+                        : `${zipNotice.zipCount.toLocaleString()} ${zipNotice.zipCount === 1 ? 'clinic' : 'clinics'} in ${zipNotice.zip}, plus nearby within ${zipNotice.radiusMiles} ${zipNotice.radiusMiles === 1 ? 'mile' : 'miles'} (${total.toLocaleString()} total)`}
                     </p>
                   )}
                   {locationText && result.clinics.length > 0 && (

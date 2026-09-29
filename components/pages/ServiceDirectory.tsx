@@ -94,8 +94,10 @@ export function ServiceDirectory({
         lng: near.lng,
         radius: distanceChoice === null ? null : nearRadius.radius,
         zip: near.zip,
+        // Ladder empty on the automatic radius, not "Any distance" picked.
+        exhausted: distanceChoice !== null && nearRadius.exhausted,
       }),
-    [listingFilters, nearMeEnabled, near.status, near.lat, near.lng, near.zip, nearRadius.radius, distanceChoice],
+    [listingFilters, nearMeEnabled, near.status, near.lat, near.lng, near.zip, nearRadius.radius, nearRadius.exhausted, distanceChoice],
   )
   // How many of the listed clinics are in the visitor's own ZIP (2026-09-28),
   // from page 1 of the near-me query. Null whenever no ZIP was sent.
@@ -151,7 +153,8 @@ export function ServiceDirectory({
   // With a radius set (the near-me default, or a distance picked in the panel)
   // the list is nearest first instead. The SQL makes the same choice on the
   // same test, so the browser never undoes the server's order.
-  const byDistance = effectiveFilters.radius != null
+  // Also nearest first once the ladder is exhausted (effectiveFilters.nearestFirst).
+  const byDistance = effectiveFilters.radius != null || Boolean(effectiveFilters.nearestFirst)
   const meritSortedClinics = useMemo(
     () =>
       byDistance
