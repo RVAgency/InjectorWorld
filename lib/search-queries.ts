@@ -432,6 +432,13 @@ export type SearchResult = {
    * it, so it never reads "Any distance" beside a list cut to 3 miles.
    */
   appliedRadiusMiles?: number | null
+  /**
+   * The list is nearest first (2026-09-30): a ZIP search, or a Distance picked
+   * on a search with a place. The cards then show each clinic's distance. A
+   * city, state or name search keeps its relevance order and shows none, so a
+   * card never reads 0.5, 2.1, 0.8 mi down the page.
+   */
+  sortedByDistance?: boolean
 }
 
 /**
@@ -997,6 +1004,17 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
   // an empty result under it is a real "no clinics within N miles".
   const zipLadder = zipFirst && pick === undefined
 
+  /**
+   * Nearest first (founder, 2026-09-30): a ZIP-centred search, or a Distance
+   * picked around the search's own place (ZIP, city, NYC, geocoded place).
+   * A city, state or name search on its own keeps its relevance order.
+   * Evaluated when used, because a picked Distance can turn a city search
+   * into a radius search further down.
+   */
+  function sortNearest(): boolean {
+    return hasGeo && (zipFirst || distanceFromPlace())
+  }
+
   let tsquery = freeText ? toPrefixTsQuery(freeText) : ''
 
   // ── The clinic the visitor typed by name (2026-09-29) ────────────────────
@@ -1413,11 +1431,17 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     // runs afterwards and still decides the final order; see that file for why.
     const ranked = rankedSqlEnabled()
     // The clinic typed by name leads everything, then the ZIP's own clinics.
+    // Nearest first where the search is about distance (sortNearest), the
+    // blended relevance score everywhere else, exactly as before.
     const orderBy = ranked
-      ? `ORDER BY ${tierExpr ? `${tierExpr} DESC, ` : ''}${zipExpr ? `${zipExpr} DESC, ` : ''}${blendedScoreSql('c', {
-          distExpr: hasGeo ? distExpr : null,
-          tsRankExpr: tsquery ? rankExpr : null,
-        })} DESC, c.id DESC`
+      ? `ORDER BY ${tierExpr ? `${tierExpr} DESC, ` : ''}${zipExpr ? `${zipExpr} DESC, ` : ''}${
+          sortNearest()
+            ? `${distExpr} ASC NULLS LAST`
+            : `${blendedScoreSql('c', {
+                distExpr: hasGeo ? distExpr : null,
+                tsRankExpr: tsquery ? rankExpr : null,
+              })} DESC`
+        }, c.id DESC`
       : ''
     // Enough rows to fill the requested page, plus a margin so a float
     // difference between Postgres numeric and JS double can only ever reorder
@@ -1509,6 +1533,21 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
         if (nameTier.size) {
           const tier = (c: SearchClinic) => nameTier.get(Number(c.id)) ?? 0
           ordered = [...ordered].sort((x, y) => tier(y) - tier(x))
+        }
+        // Nearest first (2026-09-30), in the same order as the SQL above: the
+        // typed name, then the ZIP's own clinics, then the exact distance (not
+        // the rounded miles, which tie), then id.
+        if (sortNearest()) {
+          const tier = (c: SearchClinic) => nameTier.get(Number(c.id)) ?? 0
+          const zipRank = (c: SearchClinic) => (inZip.has(Number(c.id)) ? 1 : 0)
+          const meters = (c: SearchClinic) => dist.get(Number(c.id)) ?? Number.POSITIVE_INFINITY
+          ordered = [...rankedList].sort(
+            (x, y) =>
+              tier(y) - tier(x) ||
+              zipRank(y) - zipRank(x) ||
+              (meters(x) !== meters(y) ? (meters(x) < meters(y) ? -1 : 1) : 0) ||
+              Number(y.id) - Number(x.id),
+          )
         }
         clinics = ordered.slice((page - 1) * limit, page * limit)
       }
@@ -1727,6 +1766,7 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     ...(distanceOrigin !== undefined ? { distanceOrigin } : {}),
     appliedRadiusMiles:
       hasGeo && !radiusUnbounded ? Math.round(radiusMeters / METERS_PER_MILE) : null,
+    sortedByDistance: sortNearest(),
   }
 }
 

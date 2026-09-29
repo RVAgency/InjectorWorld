@@ -30,6 +30,7 @@ export function ClinicResults({
   loadingMore = false,
   loadError = null,
   onVisibleChange,
+  showDistance = false,
 }: {
   clinics: DirectoryClinic[]
   /** The real number of matches, when more exist than are loaded. Defaults to clinics.length. */
@@ -42,6 +43,11 @@ export function ClinicResults({
   loadError?: string | null
   /** Reports how many cards are on screen, for a count shown elsewhere. */
   onVisibleChange?: (visible: number) => void
+  /**
+   * Print each clinic's distance on its card (2026-09-30). Only when the list is
+   * sorted nearest first, so the distances always read in order.
+   */
+  showDistance?: boolean
 }) {
   const [visible, setVisible] = useState(CLINIC_RESULTS_PAGE)
   const { isSaved, toggle } = useSaved()
@@ -81,7 +87,7 @@ export function ClinicResults({
             c={c}
             isSaved={isSaved('clinic', c.id)}
             isHighlighted={false}
-            dist={null}
+            dist={showDistance && typeof c.distanceMiles === 'number' ? c.distanceMiles : null}
             onSave={() => toggle('clinic', c.id)}
             // /search keeps its original sizes: components/search is out of
             // scope for the 2026-09-24 page-speed work (hard rule).

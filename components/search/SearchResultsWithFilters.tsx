@@ -89,6 +89,7 @@ export function SearchResultsWithFilters({
   filtersActive,
   distanceOrigin,
   appliedRadiusMiles,
+  sortedByDistance = false,
 }: {
   /** Page 1 of the search, already filtered on the server. */
   clinics: DirectoryClinic[]
@@ -114,6 +115,8 @@ export function SearchResultsWithFilters({
   distanceOrigin: { lat: number; lng: number } | null
   /** Radius the list is already cut to, shown in the Distance control. */
   appliedRadiusMiles: number | null
+  /** The list is nearest first, so each card shows its distance (2026-09-30). */
+  sortedByDistance?: boolean
 }) {
   const router = useRouter()
   // Seeded from the URL (not always '') so the dropdown reflects the current
@@ -307,6 +310,7 @@ export function SearchResultsWithFilters({
             loadingMore={loadingMore}
             loadError={loadError}
             onVisibleChange={setVisibleCount}
+            showDistance={sortedByDistance}
           />
         )}
       </div>
