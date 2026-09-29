@@ -159,18 +159,49 @@ export const CLINIC_GEOG = clinicGeog('clinics')
 export const METERS_PER_MILE = 1609.344
 
 /**
+ * The searchable words of free text, the way to_tsvector stores a clinic name
+ * (2026-09-29): letters and digits of any script, and dots INSIDE a word.
+ *
+ * Until then every character outside a-z and 0-9 was replaced with a space, so
+ * "Éternité" became "ternit" and "SKŸNN" became "sk nn", and neither could ever
+ * match the stored 'éternité' / 'skÿnn'. "M.D." became "m" and "d", but
+ * to_tsvector keeps it as one lexeme, 'm.d', so a typed clinic name carrying
+ * a credential found nothing. Plain a-z/0-9 text splits exactly as before.
+ * Dots are kept only in abbreviations whose parts are all one to three letters
+ * (m.d, d.d.s, ph.d); "st.louis" still splits into "st" and "louis" as it did.
+ * Only letters, digits and dots survive, so nothing here can be tsquery syntax.
+ */
+export function queryWords(input: string): string[] {
+  return (input || '')
+    .normalize('NFC')
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}.]+/u)
+    .map((t) => t.replace(/^\.+|\.+$/g, ''))
+    .flatMap((t) => (!t.includes('.') || /^(\p{L}{1,3}\.)+\p{L}{1,3}$/u.test(t) ? [t] : t.split('.')))
+    .filter((t) => t.length > 0)
+}
+
+/**
  * Build a prefix tsquery string from free-text input, for partial-word matching.
  * "lena park" -> "lena:* & park:*". We construct it from sanitized tokens rather
  * than passing user text to to_tsquery() (which throws on malformed syntax).
  * Returns '' when there is nothing searchable.
+ *
+ * `nameOnly` restricts every word to weight A, which clinicTsv gives the clinic
+ * name alone: "spa:*A" matches a clinic NAMED spa-something, not one whose
+ * tagline or street says spa.
  */
-export function toPrefixTsQuery(input: string): string {
-  const tokens = (input || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .map((t) => t.trim())
-    .filter((t) => t.length > 0)
+export function toPrefixTsQuery(input: string, opts: { nameOnly?: boolean } = {}): string {
+  const tokens = queryWords(input)
   if (tokens.length === 0) return ''
-  return tokens.map((t) => `${t}:*`).join(' & ')
+  const suffix = opts.nameOnly ? ':*A' : ':*'
+  // A word typed WITH accents also matches the same word stored without them
+  // ("café" finds "Cafe"), which the old a-z-only split did by accident.
+  // Plain a-z words produce exactly the query they always did.
+  return tokens
+    .map((t) => {
+      const plain = t.normalize('NFD').replace(/\p{M}+/gu, '')
+      return plain && plain !== t ? `(${t}${suffix} | ${plain}${suffix})` : `${t}${suffix}`
+    })
+    .join(' & ')
 }

@@ -263,7 +263,7 @@ const MAX_PHRASE_WORDS = 3
 // keeps "Jenna Wu, PA" / "Dr. Lena Park MD" matching the stored full name. "pa",
 // "do", etc. would also collide with state codes / English words, which is the
 // other reason 2-letter state codes are kept OUT of the location lookup.
-const NAME_NOISE = new Set([
+export const NAME_NOISE = new Set([
   'dr', 'dr.', 'doctor', 'md', 'do', 'np', 'pa', 'rn', 'dds', 'dmd', 'facs', 'faad',
 ])
 

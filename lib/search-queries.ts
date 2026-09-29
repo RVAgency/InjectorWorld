@@ -12,6 +12,7 @@ import {
   clinicDistanceMetersHaversine,
   clinicBoundingBoxSql,
   toPrefixTsQuery,
+  queryWords,
   METERS_PER_MILE,
 } from './search-sql'
 import {
@@ -20,6 +21,7 @@ import {
   buildBrandLookup,
   buildTolerantLookups,
   resolveTolerant,
+  NAME_NOISE,
   type IntentLookups,
   type ParsedIntent,
 } from './search-intent'
@@ -478,6 +480,81 @@ function safeZip(z: string | undefined | null): string | undefined {
 }
 
 /**
+ * Most clinics a query's "named with every typed word" match may add
+ * (2026-09-29). More than this and the words are generic, not one clinic's
+ * name; see matchTypedName.
+ */
+const NAMED_MATCH_MAX = 100
+
+/**
+ * Accent-free, lowercase form of a clinic name or a typed word (2026-09-29), so
+ * "eternite" can find "Éternité" and "beaute evolution" can find "Beauté +
+ * Évolution Spa". Postgres here has no unaccent extension, and the full-text
+ * index is built on the names as stored, so this runs in JavaScript over the
+ * short list of names that carry accents (see accentedNames).
+ */
+function foldAccents(s: string): string {
+  return s
+    .normalize('NFD')
+    .replace(/\p{M}+/gu, '')
+    .replace(/ß/g, 'ss')
+    .replace(/[æÆ]/g, 'ae')
+    .replace(/[œŒ]/g, 'oe')
+    .replace(/[øØ]/g, 'o')
+    .replace(/[łŁ]/g, 'l')
+    .replace(/[đĐ]/g, 'd')
+    .toLowerCase()
+}
+
+const foldedWords = (s: string) => foldAccents(s).split(/[^\p{L}\p{N}]+/u).filter(Boolean)
+
+/** A typed name or clinic name compared as text: lowercase, single spaces. */
+const nameKey = (s: string) => s.normalize('NFC').toLowerCase().replace(/\s+/g, ' ').trim()
+
+/**
+ * Published clinics whose names carry accented letters, as accent-free words
+ * (about 1,000 of 57,000 on staging, 2026-09-29). Loaded in the background and
+ * kept for an hour: a search never waits for it, and until the first load
+ * lands an accent-free query simply cannot reach an accented name, which is
+ * how search behaved before this existed.
+ */
+/** `words`: every word, accent-free. `plain`: the ones that had no accent to begin with. */
+type AccentedName = { id: number; words: string[]; plain: string[]; key: string }
+const ACCENTED_TTL_MS = 60 * 60 * 1000
+let accentedCache: { at: number; rows: AccentedName[] } | null = null
+let accentedLoading: Promise<void> | null = null
+
+function accentedNames(pool: any): AccentedName[] {
+  const fresh = accentedCache && Date.now() - accentedCache.at < ACCENTED_TTL_MS
+  if (!fresh && !accentedLoading) {
+    accentedLoading = pool
+      .query(`SELECT id, clinic_name FROM clinics WHERE status = 'published' AND clinic_name ~ '[^[:ascii:]]'`)
+      .then((res: any) => {
+        const rows: AccentedName[] = []
+        for (const r of res.rows) {
+          const name = String(r.clinic_name ?? '')
+          // Only names an accent-free query could miss. A curly apostrophe or a
+          // (R) sign changes nothing a typed word is matched against.
+          if (foldAccents(name) === name.toLowerCase()) continue
+          const original = name.normalize('NFC').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean)
+          rows.push({
+            id: Number(r.id),
+            words: foldedWords(name),
+            plain: original.filter((w) => foldAccents(w) === w),
+            key: foldAccents(nameKey(name)),
+          })
+        }
+        accentedCache = { at: Date.now(), rows }
+      })
+      .catch(() => {})
+      .finally(() => {
+        accentedLoading = null
+      })
+  }
+  return accentedCache?.rows ?? []
+}
+
+/**
  * The middle of a searched city (2026-09-29): the median coordinates of the
  * published clinics in the city that the search's own location text matches
  * most often. "houston" also matches South Houston and Houston, MO; the median
@@ -922,6 +999,157 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
 
   let tsquery = freeText ? toPrefixTsQuery(freeText) : ''
 
+  // ── The clinic the visitor typed by name (2026-09-29) ────────────────────
+  // A word of a clinic's name that is also a treatment or a brand ("Optimal
+  // Wellness St. Pete", "Lift Facial Aesthetics", "Radiesse Treatment Medspa")
+  // is read as that treatment, so the search only looked at clinics TAGGED with
+  // it and missed the clinic itself: 33 of 200 random clinic names were not
+  // found by their own name on staging, most of them with zero results. Now:
+  //   - a query that also has name words (freeText) and read a treatment or
+  //     brand ALSO returns the clinics whose name holds every typed word, still
+  //     inside the place the search named, and lists them first;
+  //   - a clinic whose name is exactly what was typed is listed first on any
+  //     name query ("My Spa" among 16,740 spa matches);
+  //   - accent-free typing reaches accented names (see accentedNames).
+  // A query with no name words ("botox houston", "lip filler 77098") never gets
+  // here, so its SQL is exactly what it was.
+  const treatmentFromQuery = !explicitTreatment && treatmentId !== undefined
+  // The place phrase the query itself named; the location rescue gives it back
+  // to the name.
+  let placeInQuery = parsed.location
+  // The place was read from the typed words, not the location field.
+  const placeFromQuery = !explicitLocation && !!parsed.location
+  // exact: clinics whose name is exactly what was typed, listed first.
+  // accent: accented names the typed words reach only without the accents.
+  // nameTsq: when a treatment or brand word was taken out of the name, every
+  // clinic NAMED with all the typed words (a weight-A tsquery), listed next.
+  type NameMatch = { exact: number[]; accent: number[]; nameTsq: string | null }
+  const noNameMatch = (): NameMatch => ({ exact: [], accent: [], nameTsq: null })
+  let nameMatch: NameMatch = noNameMatch()
+  const hasTypedNameMatch = () =>
+    nameMatch.exact.length > 0 || nameMatch.accent.length > 0 || nameMatch.nameTsq !== null
+
+  /** The typed words that could be a clinic's name: all but the ZIP, the place and honorifics. */
+  function typedNameWords(): string[] {
+    if (!rawQ || parsed.nearMe) return []
+    const words = queryWords(rawQ)
+    if (parsed.zip) {
+      const i = words.indexOf(parsed.zip)
+      if (i >= 0) words.splice(i, 1)
+    }
+    if (placeInQuery) {
+      const place = queryWords(placeInQuery)
+      for (let i = 0; place.length && i + place.length <= words.length; i++) {
+        if (place.every((w, k) => words[i + k] === w)) {
+          words.splice(i, place.length)
+          break
+        }
+      }
+    }
+    return words.filter((w) => !NAME_NOISE.has(w))
+  }
+
+  async function matchTypedName(): Promise<void> {
+    nameMatch = noNameMatch()
+    if (!freeText) return
+    const words = typedNameWords()
+    if (!words.length) return
+    // A treatment or brand word was taken out of the name: look for the name.
+    const mixed = (treatmentFromQuery && treatmentId !== undefined) || brandId !== undefined
+    const typed = nameKey(parsed.zip ? rawQ.replace(parsed.zip, ' ') : rawQ)
+    const accentFree = foldAccents(typed) === typed
+    const folded = words.flatMap(foldedWords)
+    // Only names the typed words reach BECAUSE the accents were dropped: every
+    // word matches, and at least one of them matches only an accented word.
+    // "spa" alone must not pull every "Beauté ... Spa" to the top.
+    const accentIds = accentFree && folded.length
+      ? accentedNames(pool)
+          .filter(
+            (r) =>
+              folded.every((t) => r.words.some((w) => w.startsWith(t))) &&
+              folded.some((t) => !r.plain.some((w) => w.startsWith(t))),
+          )
+          .slice(0, 50)
+          .map((r) => r.id)
+      : []
+    // Applied inside the main query (see candidateWhere), so there is no cap
+    // on how many clinics it can bring in and the total stays a real count.
+    const nameTsq = mixed ? toPrefixTsQuery(words.join(' '), { nameOnly: true }) || null : null
+
+    const p: any[] = []
+    const b = (v: any) => {
+      p.push(v)
+      return `$${p.length}`
+    }
+    // The whole typed text as the name, case-insensitively. ILIKE with no
+    // wildcard (they are escaped) is an equality test the trigram index on
+    // clinic_name can answer, so this never scans the table.
+    const typedRef = b(typed.replace(/[\\%_]/g, (ch) => `\\${ch}`))
+    const exactExpr = `(c.clinic_name ILIKE ${typedRef})`
+    const accentSql = accentIds.length ? `c.id = ANY(ARRAY[${accentIds.join(',')}]::int[])` : ''
+
+    // Inside the place the search named, exactly as the reading applies it,
+    // except that a place read out of the typed words themselves does not
+    // bind a clinic whose whole name was typed: in "Newport Dermatology
+    // Institute" the "Newport" is part of the name, and the clinic is in Costa
+    // Mesa. A place typed in the location field, a ZIP and a picked Distance
+    // still do. Built per branch, so every bound value is one the SQL uses
+    // (Postgres refuses a parameter the statement never references).
+    const geoWhere = geoSql('c').whereClause
+    const placeSql = (forExactName: boolean): string => {
+      const xs: string[] = []
+      const bindsPlace = !(forExactName && placeFromQuery)
+      if (stateCode && bindsPlace) xs.push(`c.state = ${b(stateCode)}`)
+      if (cityLike && bindsPlace) {
+        const ref = b(cityLike)
+        xs.push(`(c.city ILIKE ${ref} OR c.neighborhood ILIKE ${ref})`)
+      }
+      if (geoWhere) xs.push(geoWhere)
+      return xs.length ? xs.join(' AND ') : 'TRUE'
+    }
+    // The exact typed name, and the accented names, as ids. (The accented ones
+    // are checked against the place again in the main query.)
+    const branches = [`(${exactExpr} AND ${placeSql(true)})`]
+    if (accentSql) branches.push(`(${accentSql} AND ${placeSql(false)})`)
+    // How many clinics are NAMED with every typed word, counted only up to one
+    // past NAMED_MATCH_MAX. Past it the words are generic ("Wellness Spa":
+    // 1,300 names) rather than one clinic's name, and adding them all cost
+    // 780 ms against 48 on staging; the exact name still leads either way.
+    const namedCount = nameTsq
+      ? `(SELECT count(*)::int FROM (SELECT 1 FROM clinics c WHERE c.status = 'published'
+           AND ${clinicTsv('c')} @@ to_tsquery('english', ${b(nameTsq)}) AND ${placeSql(false)}
+           LIMIT ${NAMED_MATCH_MAX + 1}) named)`
+      : '0'
+    // Room for a chain's many identically named branches (there are 240
+    // "Massage Envy" clinics), which all rank as the exact name. One round
+    // trip: the count comes back even when no clinic matched by name.
+    const res = await pool.query(
+      `WITH hits AS (
+         SELECT c.id, c.clinic_name, ${exactExpr} AS exact FROM clinics c
+         WHERE c.status = 'published' AND (${branches.join(' OR ')})
+         ORDER BY exact DESC, c.id DESC LIMIT 1000
+       )
+       SELECT hits.id, hits.clinic_name, hits.exact, ${namedCount} AS named_n
+       FROM (SELECT 1) one LEFT JOIN hits ON TRUE`,
+      p,
+    )
+    const accentSet = new Set(accentIds)
+    const typedFolded = foldAccents(typed)
+    const next = noNameMatch()
+    const namedN = Number(res.rows[0]?.named_n ?? 0)
+    next.nameTsq = nameTsq && namedN > 0 && namedN <= NAMED_MATCH_MAX ? nameTsq : null
+    for (const row of res.rows) {
+      if (row.id == null) continue
+      const id = Number(row.id)
+      if (!Number.isInteger(id)) continue
+      const folded = foldAccents(nameKey(String(row.clinic_name ?? '')))
+      if (row.exact === true || (accentSet.has(id) && folded === typedFolded)) next.exact.push(id)
+      else if (accentSet.has(id)) next.accent.push(id)
+    }
+    nameMatch = next
+  }
+
+
   const toMiles = (m?: number) =>
     m != null ? Math.round((m / METERS_PER_MILE) * 10) / 10 : undefined
 
@@ -996,11 +1224,16 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
   // adds the listing-panel filters; with it false (or no filters set) the SQL
   // is exactly what it was before the filters existed, clause for clause and
   // parameter for parameter, so an unfiltered search cannot change.
-  function candidateWhere(applyFilters: boolean): {
+  function candidateWhere(
+    applyFilters: boolean,
+    opts: { withoutNameUnion?: boolean } = {},
+  ): {
     params: any[]
     whereSql: string
     distExpr: string
     rankExpr: string
+    /** Orders the clinic typed by name first; null when the query named none. */
+    tierExpr: string | null
   } {
     const params: any[] = []
     const bind = (v: any) => {
@@ -1029,6 +1262,8 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     if (tsquery) {
       where.push(`${clinicTsv('c')} @@ to_tsquery('english', ${tsqRef})`)
     }
+    // Everything from here to the panel filters is the PLACE.
+    const placeStart = where.length
     if (stateCode) where.push(`c.state = ${bind(stateCode)}`)
     // ILIKE, not lower(...) LIKE. Wrapping the column in lower() is exactly what
     // stops the gin_trgm_ops index on clinic city/neighborhood text from
@@ -1042,6 +1277,33 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     // Without the filters, a picked Distance is left out too: it is one of them.
     const clinicGeo = geoSql('c', { unbounded: !applyFilters && distanceFromPlace() })
     if (clinicGeo.whereClause) where.push(clinicGeo.whereClause)
+    // The clinics typed by name (matchTypedName) join the reading above; the
+    // panel filters below still apply to them:
+    //   (PLACE AND (reading OR named with every typed word OR accented name))
+    //   OR exact typed name (already checked against its own place)
+    // Ids are integers from the database, written as literals. With no name
+    // match the SQL is exactly what it was.
+    let tierExpr: string | null = null
+    const typed = nameMatch
+    if (!opts.withoutNameUnion && hasTypedNameMatch()) {
+      const reading = where.slice(1, placeStart)
+      const place = where.slice(placeStart)
+      where.length = 1
+      const alts = [reading.length ? `(${reading.join(' AND ')})` : 'TRUE']
+      let namedSql = ''
+      if (typed.nameTsq) {
+        namedSql = `${clinicTsv('c')} @@ to_tsquery('english', ${bind(typed.nameTsq)})`
+        alts.push(namedSql)
+      }
+      if (typed.accent.length) alts.push(`c.id = ANY(ARRAY[${typed.accent.join(',')}]::int[])`)
+      const inPlace = `(${place.length ? `${place.join(' AND ')} AND ` : ''}(${alts.join(' OR ')}))`
+      const exactSql = typed.exact.length ? `c.id = ANY(ARRAY[${typed.exact.join(',')}]::int[])` : ''
+      where.push(exactSql ? `(${inPlace} OR ${exactSql})` : inPlace)
+      const tiers: string[] = []
+      if (exactSql) tiers.push(`WHEN ${exactSql} THEN 2`)
+      if (namedSql) tiers.push(`WHEN ${namedSql} THEN 1`)
+      if (tiers.length) tierExpr = `(CASE ${tiers.join(' ')} ELSE 0 END)`
+    }
     if (applyFilters && filtersActive) {
       // Same SQL as fetchLeanClinics (lib/lean-clinic-listing.ts), so a filter
       // means the same thing on /search as on every other listing: OR within
@@ -1087,7 +1349,7 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     const distExpr = clinicGeo.distExpr
     const rankExpr = tsquery ? `ts_rank(${clinicTsv('c')}, to_tsquery('english', ${tsqRef}))` : 'NULL'
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
-    return { params, whereSql, distExpr, rankExpr }
+    return { params, whereSql, distExpr, rankExpr, tierExpr }
   }
 
   /**
@@ -1101,6 +1363,20 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
    * re-read only happens if the unfiltered query also matched nothing, which
    * is exactly when it happened before filters existed.
    */
+  /**
+   * Whether the reading ALONE matches anything, leaving out the clinics typed
+   * by name. The location rescue asks this: a place word guessed out of a
+   * clinic's name ("Ada West Dermatology") must still send the search back to
+   * the name, with the heading that goes with it, even though the typed-name
+   * match has already found the clinic. With no typed-name match it is the
+   * same query as unfilteredMatchExists / the pass itself.
+   */
+  async function readingMatches(applyFilters: boolean): Promise<boolean> {
+    const { params, whereSql } = candidateWhere(applyFilters, { withoutNameUnion: true })
+    const res = await pool.query(`SELECT 1 FROM clinics c ${whereSql} LIMIT 1`, params)
+    return res.rows.length > 0
+  }
+
   async function unfilteredMatchExists(): Promise<boolean> {
     const { params, whereSql } = candidateWhere(false)
     const res = await pool.query(`SELECT 1 FROM clinics c ${whereSql} LIMIT 1`, params)
@@ -1117,8 +1393,10 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     inZip: Set<number>
     /** How many of `total` are in the centre ZIP (zipLadder only, else 0). */
     zipTotal: number
+    /** Candidate ids typed by name: 2 exact name, 1 named with every typed word. */
+    nameTier: Map<number, number>
   }> {
-    const { params, whereSql, distExpr, rankExpr } = candidateWhere(true)
+    const { params, whereSql, distExpr, rankExpr, tierExpr } = candidateWhere(true)
     // ZIP-centred: the ZIP's own clinics first (2026-09-28), under a picked
     // Distance as well. A literal, see safeZip.
     const zipExpr = zipFirst ? `(c.zip = '${zipCenter}')` : null
@@ -1134,8 +1412,9 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     // page needs plus a margin, and count the matches for real. JS ranking still
     // runs afterwards and still decides the final order; see that file for why.
     const ranked = rankedSqlEnabled()
+    // The clinic typed by name leads everything, then the ZIP's own clinics.
     const orderBy = ranked
-      ? `ORDER BY ${zipExpr ? `${zipExpr} DESC, ` : ''}${blendedScoreSql('c', {
+      ? `ORDER BY ${tierExpr ? `${tierExpr} DESC, ` : ''}${zipExpr ? `${zipExpr} DESC, ` : ''}${blendedScoreSql('c', {
           distExpr: hasGeo ? distExpr : null,
           tsRankExpr: tsquery ? rankExpr : null,
         })} DESC, c.id DESC`
@@ -1148,7 +1427,9 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
       ? Math.min(CANDIDATE_CAP, page * limit + RANKED_FETCH_MARGIN)
       : CANDIDATE_CAP
 
-    const sql = `SELECT c.id AS id, ${distExpr} AS dist_m, ${rankExpr} AS text_rank${zipExpr ? `, ${zipExpr} AS in_zip` : ''}
+    const sql = `SELECT c.id AS id, ${distExpr} AS dist_m, ${rankExpr} AS text_rank${zipExpr ? `, ${zipExpr} AS in_zip` : ''}${
+      tierExpr ? `, ${tierExpr} AS name_tier` : ''
+    }
                  FROM clinics c
                  ${whereSql}
                  ${orderBy}
@@ -1157,6 +1438,7 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     const dist = new Map<number, number>()
     const rank = new Map<number, number>()
     const inZip = new Set<number>()
+    const nameTier = new Map<number, number>()
     const ids: number[] = []
     for (const row of res.rows) {
       const id = Number(row.id)
@@ -1164,6 +1446,7 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
       if (row.dist_m != null) dist.set(id, Number(row.dist_m))
       if (row.text_rank != null) rank.set(id, Number(row.text_rank))
       if (row.in_zip === true) inZip.add(id)
+      if (Number(row.name_tier) > 0) nameTier.set(id, Number(row.name_tier))
     }
 
     // The real match count. Measured on production for the largest filter
@@ -1180,7 +1463,7 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
       if (zipExpr) zipTotal = Number(countRes.rows[0]?.z ?? inZip.size)
     }
 
-    return { ids, dist, rank, total, inZip, zipTotal }
+    return { ids, dist, rank, total, inZip, zipTotal, nameTier }
   }
 
   // ── Hydrate + rank one pass ──────────────────────────────────────────────
@@ -1189,7 +1472,7 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     let clinicTotal = 0
     let zipTotal = 0
     {
-      const { ids, dist, rank, total, inZip, zipTotal: zt } = await clinicCandidates()
+      const { ids, dist, rank, total, inZip, zipTotal: zt, nameTier } = await clinicCandidates()
       clinicTotal = total
       zipTotal = zt
       if (ids.length) {
@@ -1214,12 +1497,19 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
         const rankedList = rankClinics(mapped, { useDistance: hasGeo, useText: !!tsquery })
         // ZIP-centred: the ZIP's own clinics lead, each group keeping the
         // ranking order (2026-09-28). Same order the SQL fetched them in.
-        const ordered = inZip.size
+        let ordered = inZip.size
           ? [
               ...rankedList.filter((c) => inZip.has(Number(c.id))),
               ...rankedList.filter((c) => !inZip.has(Number(c.id))),
             ]
           : rankedList
+        // Ahead of that, the clinic typed by name (2026-09-29): its exact name
+        // first, then names holding every typed word. A stable sort, so each
+        // group keeps the order above.
+        if (nameTier.size) {
+          const tier = (c: SearchClinic) => nameTier.get(Number(c.id)) ?? 0
+          ordered = [...ordered].sort((x, y) => tier(y) - tier(x))
+        }
         clinics = ordered.slice((page - 1) * limit, page * limit)
       }
     }
@@ -1253,6 +1543,10 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
       stateCode = undefined
     }
   }
+
+  // With the reading settled (place, radius), look for the clinic typed by
+  // name. Redone below whenever a rescue changes the reading.
+  await matchTypedName()
 
   let pass = await runPass()
 
@@ -1295,13 +1589,15 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
   const labelBeforeRescue = locationLabel
   let rescued = false
   if (
-    pass.clinicTotal === 0 &&
     rawQ &&
     locationWasGuessed &&
     !hasGeo &&
+    // The reading found nothing. Clinics found only by their typed name do
+    // not count (see readingMatches); with none, this is the pass's own total.
+    (hasTypedNameMatch() ? !(await readingMatches(true)) : pass.clinicTotal === 0) &&
     // Listing filters emptied a query that does match: that is a real "no
     // results", not a misread name. See unfilteredMatchExists.
-    !(filtersActive && (await unfilteredMatchExists()))
+    !(filtersActive && (await readingMatches(false)))
   ) {
     // Put the misread words back into the name query and drop the filters they
     // produced.
@@ -1311,7 +1607,40 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
     cityLike = undefined
     locationLabel = undefined
     rescued = true
+    // The place words are name words again.
+    placeInQuery = undefined
+    await matchTypedName()
     if (tsquery) pass = await runPass()
+  }
+
+  // ── Treatment / brand rescue (2026-09-29) ────────────────────────────────
+  // The same idea for a treatment or brand read out of a clinic's name. When
+  // the reading AND the typed-name match both found nothing, the treatment or
+  // brand word goes back into the name and the whole thing is searched as a
+  // name, across every searchable field (name, tagline, city, street), inside
+  // whatever place the search named: "Optimal Wellness St Petersburg", where
+  // "St Petersburg" is the clinic's city and not part of its name. If that
+  // finds nothing either, the original reading and its heading are kept.
+  if (
+    pass.clinicTotal === 0 &&
+    rawQ &&
+    ((treatmentFromQuery && treatmentId !== undefined) || brandId !== undefined) &&
+    !(filtersActive && (await unfilteredMatchExists()))
+  ) {
+    const words = typedNameWords()
+    if (words.length) {
+      const before = { treatmentId, treatmentLabel, brandId, brandLabel, freeText, tsquery, nameMatch }
+      treatmentId = undefined
+      treatmentLabel = undefined
+      brandId = undefined
+      brandLabel = undefined
+      freeText = words.join(' ')
+      tsquery = toPrefixTsQuery(freeText)
+      await matchTypedName()
+      const retry = tsquery ? await runPass() : pass
+      if (retry.clinicTotal > 0) pass = retry
+      else ({ treatmentId, treatmentLabel, brandId, brandLabel, freeText, tsquery, nameMatch } = before)
+    }
   }
 
   // ── Place-name fallback ──────────────────────────────────────────────────
@@ -1341,6 +1670,7 @@ export async function searchDirectory(params: SearchParams): Promise<SearchResul
       // A picked Distance is measured from the place just found.
       if (distanceFromPlace()) applyPickedDistance()
       tsquery = '' // it was a place, not a name
+      nameMatch = noNameMatch()
       locationLabel = hit.label
       pass = await runPass()
     }
