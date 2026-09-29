@@ -406,8 +406,12 @@ export function HeroSearch() {
   }
 
   function pickWhereSuggestion(s: Suggestion) {
+    // Fill the field, then Search runs both (2026-09-30). Navigating to the
+    // suggestion's own url threw away what was typed in the first field:
+    // "cheek filler" + the "33130, Miami, FL" suggestion searched 33130 alone.
+    whereEditedRef.current = true
+    setWhereQuery(s.label)
     setWhereOpen(false)
-    router.push(s.href)
   }
 
   function pickPopular(t: string) {

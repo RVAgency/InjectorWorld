@@ -11,7 +11,7 @@ import {
 import { getLocationFilterOptions } from '@/lib/location-queries'
 import { getTopResults } from '@/lib/search-content'
 import { TopResults } from '@/components/search/TopResults'
-import { HeaderSearchBar } from '@/components/header/HeaderSearchBar'
+import { SearchTwoField } from '@/components/search/SearchTwoField'
 import { SearchMapSection } from '@/components/search/SearchMapSection'
 import { SearchResultsWithFilters } from '@/components/search/SearchResultsWithFilters'
 import { LiveCountPill } from '@/components/shared/LiveCountPill'
@@ -83,6 +83,7 @@ export default async function SearchPage({
   // already cut to (2026-09-29). See SearchResult.distanceOrigin.
   const distanceOrigin = 'distanceOrigin' in result ? (result.distanceOrigin ?? null) : null
   const appliedRadiusMiles = 'appliedRadiusMiles' in result ? (result.appliedRadiusMiles ?? null) : null
+  const sortedByDistance = 'sortedByDistance' in result ? Boolean(result.sortedByDistance) : false
   const treatmentText = result.serviceLabel || treatment
   const brandText = result.brandLabel
   const locationText = result.locationLabel || effectiveLocation
@@ -119,7 +120,16 @@ export default async function SearchPage({
               Search by treatment, location, ZIP, or name to find verified clinics.
             </p>
           )}
-          <HeaderSearchBar defaultQuery={omniValue} className="max-w-2xl" autoFocus={!hasQuery} />
+          {/* The homepage's two fields (2026-09-30), started from this search:
+              what was typed (or the legacy `treatment`) and the typed place.
+              A state or city from the dropdown below is kept while the place
+              field is empty. */}
+          <SearchTwoField
+            defaultWhat={q || treatment}
+            defaultWhere={location}
+            keepPlace={location ? undefined : { state: barState, city: barCity }}
+            autoFocus={!hasQuery}
+          />
         </div>
       </section>
 
@@ -188,6 +198,7 @@ export default async function SearchPage({
                     filtersActive={filtersActive}
                     distanceOrigin={distanceOrigin}
                     appliedRadiusMiles={appliedRadiusMiles}
+                    sortedByDistance={sortedByDistance}
                   />
                 </>
               )}
