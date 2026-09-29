@@ -215,6 +215,7 @@ function contentExport(table: 'guides' | 'news'): ExportDefinition {
   add('Uploaded', 'uploaded', 12)
   add('Published', 'published', 12)
   if (isGuide) add('Updated (shown on page)', 'contentUpdated', 13)
+  add('Hero Image Updated', 'heroUpdated', 13)
   add('Last Edited in Admin', 'edited', 13)
   add('Featured', 'featured', 9)
   add('Nofollow', 'nofollow', 9)
@@ -239,7 +240,7 @@ function contentExport(table: 'guides' | 'news'): ExportDefinition {
                     c.meta_title, c.meta_description, c.meta_image_id, c.cover_image_url, c.featured,
                     c.nofollow, c.import_batch, c.created_at, c.published_at, c.updated_at,
                     c.body, c.faq, c.sources, c.internal_links, ${guideOnly},
-                    m.url AS cover_upload_url, m.alt AS cover_alt,
+                    m.url AS cover_upload_url, m.alt AS cover_alt, m.created_at AS cover_uploaded_at,
                     a.full_name AS author, r.full_name AS reviewer, r.credentials::text AS reviewer_credentials,
                     s.name AS related_service,
                     pi.path, pi.index_mode::text AS index_mode, COALESCE(pi.indexed, false) AS indexed,
@@ -302,6 +303,10 @@ function contentExport(table: 'guides' | 'news'): ExportDefinition {
         uploaded: ymd(r.created_at),
         published: ymd(r.published_at),
         contentUpdated: ymd(r.content_updated_at),
+        // Guides and news keep no version history, so the upload date of the
+        // media doc now attached is the only real record of when the hero
+        // changed (2026-09-29). Blank for a hero from the url field.
+        heroUpdated: r.cover_upload_url ? ymd(r.cover_uploaded_at) : '',
         edited: ymd(r.updated_at),
         featured: yesNo(r.featured),
         nofollow: yesNo(r.nofollow),
