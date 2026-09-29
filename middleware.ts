@@ -139,6 +139,13 @@ function collectionSlug(pathname: string): string | null {
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl
 
+  // A NUL byte in a query value is never legitimate, and Postgres refuses it
+  // inside a text parameter, so it surfaced as a 500 from /search and every
+  // listing API (security sweep, 2026-09-29). Refuse it before a route runs.
+  for (const value of req.nextUrl.searchParams.values()) {
+    if (value.includes('\u0000')) return new NextResponse('Bad Request', { status: 400 })
+  }
+
   if (!pathname.startsWith('/api/')) return NextResponse.next()
 
   const ua = req.headers.get('user-agent') || ''
@@ -182,5 +189,6 @@ export function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: '/api/:path*',
+  // /search only for the NUL-byte check above; everything else here is /api.
+  matcher: ['/api/:path*', '/search'],
 }

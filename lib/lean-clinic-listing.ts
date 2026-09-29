@@ -131,12 +131,18 @@ export type LeanListingFilters = {
  *  query string is dropped rather than passed to SQL. */
 const CLINIC_TYPES = ['medspa', 'dermatology', 'plastic-surgery', 'dental-aesthetics', 'other']
 
+/** Largest value of a Postgres `integer` column; the ids are cast `::int[]`. */
+const MAX_INT4 = 2147483647
+
 function idList(raw: string | null): number[] | undefined {
   if (!raw) return undefined
   const ids = raw
     .split(',')
     .map((v) => Number(v.trim()))
-    .filter((n) => Number.isInteger(n) && n > 0)
+    // Above MAX_INT4 the ::int[] cast throws "value out of range", which was a
+    // 500 on every listing API and /search for brand=99999999999999999999
+    // (security sweep, 2026-09-29). No real id is anywhere near it.
+    .filter((n) => Number.isInteger(n) && n > 0 && n <= MAX_INT4)
   return ids.length > 0 ? ids : undefined
 }
 
