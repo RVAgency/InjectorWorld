@@ -196,17 +196,26 @@ const nextConfig = {
   // scanner which framework to try. docs/FIX-ALL-PLAN-2026-09-24.md 1.7.
   poweredByHeader: false,
   images: {
+    // EXACT hosts only, never a wildcard over a shared host (2026-10-05).
+    // /_next/image downloads and decodes whatever an allowed host serves, for
+    // any anonymous caller. `*.digitaloceanspaces.com` and `**.r2.dev` let
+    // anyone who opens a Spaces/R2 bucket feed the optimizer their own file:
+    // an oversized image (GHSA-9g9p-9gw9-jx7f, out of memory) or a crafted AVIF
+    // (GHSA-2xp9-vwfh-vxw4, remote code execution through libheif). This list
+    // is every host the staging DB's image columns actually use, plus our own.
+    // Adding a host: make it one exact hostname you control or trust.
     remotePatterns: [
+      // Our Spaces bucket: CDN host (clinic photos, guide/news covers) and the
+      // origin host (Payload uploads, while R2_PUBLIC_URL points there).
+      { protocol: 'https', hostname: 'iw-media.sfo3.cdn.digitaloceanspaces.com' },
+      { protocol: 'https', hostname: 'iw-media.sfo3.digitaloceanspaces.com' },
+      { protocol: 'https', hostname: 'injector.world' },
+      // Demo/seed images still referenced by authors, medical reviewers,
+      // locations and photos rows.
       { protocol: 'https', hostname: 'picsum.photos' },
       { protocol: 'https', hostname: 'i.pravatar.cc' },
-      { protocol: 'https', hostname: 'images.unsplash.com' },
-      { protocol: 'https', hostname: 'media.alle.com' },
-      { protocol: 'https', hostname: 'lh3.googleusercontent.com' },
-      { protocol: 'https', hostname: 'injector.world' },
-      { protocol: 'https', hostname: '*.digitaloceanspaces.com' },
-      // Uploaded media on Cloudflare R2: managed r2.dev domain...
-      { protocol: 'https', hostname: '**.r2.dev' },
-      // ...plus a custom public domain if R2_PUBLIC_URL points at one.
+      // Whatever host R2_PUBLIC_URL names, so moving media to another public
+      // host stays an env-only change.
       ...(r2PublicHostname ? [{ protocol: 'https', hostname: r2PublicHostname }] : []),
     ],
   },

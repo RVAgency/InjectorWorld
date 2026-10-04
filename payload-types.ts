@@ -224,6 +224,7 @@ export interface User {
   resetPasswordExpiration?: string | null;
   salt?: string | null;
   hash?: string | null;
+  resetPasswordRequestedAt?: string | null;
   loginAttempts?: number | null;
   lockUntil?: string | null;
   sessions?:
@@ -614,6 +615,7 @@ export interface Media {
    */
   credit?: string | null;
   prefix?: string | null;
+  _objectKey?: string | null;
   updatedAt: string;
   createdAt: string;
   url?: string | null;
@@ -1670,7 +1672,7 @@ export interface PageIndex {
    */
   publishable?: boolean | null;
   /**
-   * Does this page have enough behind it to be worth a search result? Bar per page type: service-city 5, brand-city-directory 5, city-hub 3, service-state 10, brand-state 10, state-hub 10, service-pillar 25, brand-pillar 25, clinic 1, guide 1, news 1, static 1, question 1. Advice only, not a block: a thin page can still be submitted on purpose.
+   * Does this page have enough behind it to be worth a search result? Bar per page type: service-city 5, brand-city-directory 5, city-hub 5, service-state 10, brand-state 10, state-hub 10, service-pillar 25, brand-pillar 25, clinic 1, guide 1, news 1, static 1, question 1. Advice only, not a block: a thin page can still be submitted on purpose.
    */
   meetsThreshold?: boolean | null;
   /**
@@ -2248,6 +2250,7 @@ export interface UsersSelect<T extends boolean = true> {
   resetPasswordExpiration?: T;
   salt?: T;
   hash?: T;
+  resetPasswordRequestedAt?: T;
   loginAttempts?: T;
   lockUntil?: T;
   sessions?:
@@ -2268,6 +2271,7 @@ export interface MediaSelect<T extends boolean = true> {
   caption?: T;
   credit?: T;
   prefix?: T;
+  _objectKey?: T;
   updatedAt?: T;
   createdAt?: T;
   url?: T;
