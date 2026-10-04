@@ -142,24 +142,27 @@ async function checkC2() {
    * MAX_ANON_LIMIT.
    *
    * This is also why it is safe to run against a deployment that lacks the fix:
-   * it is a single request, not a burst.
+   * three requests one after another, not a burst.
    */
   const MAX_ANON_LIMIT = 100
 
-  const bigLimit = await get('/api/zip-codes?limit=100000&depth=0', { timeoutMs: 25000 })
-  const body = json(bigLimit)
-  const returned = body?.docs?.length
+  // limit=0 and pagination=false both mean "every row" in Payload, so they are
+  // the same attack as a huge limit. The cap lives in lib/anonymous-read-caps.ts.
+  for (const query of ['limit=100000', 'limit=0', 'pagination=false']) {
+    const res = await get(`/api/zip-codes?${query}&depth=0`, { timeoutMs: 25000 })
+    const returned = json(res)?.docs?.length
 
-  if (bigLimit.status !== 200) {
-    // Non-200 is an acceptable outcome too (the collection may be locked down
-    // later); what must never happen is a 200 carrying an unclamped page.
-    record(true, 'limit=100000 did not return an unclamped page', `status ${bigLimit.status}`)
-  } else {
-    record(
-      typeof returned === 'number' && returned <= MAX_ANON_LIMIT,
-      `limit=100000 is clamped to <= ${MAX_ANON_LIMIT} rows`,
-      `got ${returned ?? 'unparseable'} rows in ${bigLimit.ms}ms — the clamp is not applying`,
-    )
+    if (res.status !== 200) {
+      // Non-200 is an acceptable outcome too (the collection may be locked down
+      // later); what must never happen is a 200 carrying an unclamped page.
+      record(true, `${query} did not return an unclamped page`, `status ${res.status}`)
+    } else {
+      record(
+        typeof returned === 'number' && returned <= MAX_ANON_LIMIT,
+        `${query} is clamped to <= ${MAX_ANON_LIMIT} rows`,
+        `got ${returned ?? 'unparseable'} rows in ${res.ms}ms — the clamp is not applying`,
+      )
+    }
   }
 
   // depth has no visible row count, so assert it does not hang. Kept as a

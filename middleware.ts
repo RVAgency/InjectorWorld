@@ -3,13 +3,15 @@ import { NextRequest, NextResponse } from 'next/server'
 /**
  * Edge guards for /api/*.
  *
- * Three separate jobs, in order of how much they actually matter:
+ * Two separate jobs, in order of how much they actually matter:
  *
  *   1. LOCKED_COLLECTIONS — deny anonymous access to the Payload REST endpoints
  *      that expose bulk business data (clinics, providers).
- *   2. Anonymous limit/depth clamp — stop one unauthenticated request from
- *      draining the 4-connection database pool.
- *   3. NOISY_UAS — cosmetic log filtering. Not security. See the note below.
+ *   2. NOISY_UAS — cosmetic log filtering. Not security. See the note below.
+ *
+ * The anonymous limit/depth cap is NOT here any more. It lived here as a URL
+ * rewrite and never took effect (Payload reads the original request url, not
+ * the rewritten one). It is enforced inside Payload now: lib/anonymous-read-caps.ts.
  *
  * Read the note on each before changing it. In particular, do not treat this
  * file as the enforcement layer for #1: it is the cheap outer gate, and the
@@ -77,25 +79,6 @@ const OWN_ROUTES_UNDER_LOCKED_PREFIX = new Set([
   '/api/clinics/lookup',
   '/api/providers/view',
 ])
-
-/**
- * Caps applied to anonymous callers only.
- *
- * The database pool is deliberately capped at 4 connections
- * (see payload.config.ts), which makes an unbounded `limit` or `depth` a
- * one-request denial of service rather than merely a slow query. Confirmed
- * against the staging deployment: `?limit=100000` and `?depth=10` together
- * exhausted the pool and a subsequent trivial request returned 504.
- *
- * `limit` caps the row count. `depth` caps how many levels of relationships
- * Payload resolves, and its cost grows multiplicatively rather than linearly,
- * which is why it is held much lower than the row cap.
- *
- * Signed-in callers skip the clamp so the Payload admin panel, which drives its
- * list views through these same endpoints, keeps working unchanged.
- */
-const MAX_ANON_LIMIT = 100
-const MAX_ANON_DEPTH = 2
 
 /** Payload's auth cookie. Presence only — see hasSession(). */
 const SESSION_COOKIE = 'payload-token'
@@ -165,24 +148,6 @@ export function middleware(req: NextRequest) {
     // 404 rather than 403: a 403 confirms the endpoint exists and is merely
     // gated, which tells a prober exactly where to keep pushing.
     return new NextResponse('Not Found', { status: 404 })
-  }
-
-  if (!signedIn) {
-    const limit = req.nextUrl.searchParams.get('limit')
-    const depth = req.nextUrl.searchParams.get('depth')
-
-    const overLimit = limit !== null && Number(limit) > MAX_ANON_LIMIT
-    const overDepth = depth !== null && Number(depth) > MAX_ANON_DEPTH
-
-    if (overLimit || overDepth) {
-      // Rewrite to the clamped values rather than rejecting. A 400 here would
-      // break any legitimate caller that simply asked for too much, whereas a
-      // clamp still answers the question, just bounded.
-      const url = req.nextUrl.clone()
-      if (overLimit) url.searchParams.set('limit', String(MAX_ANON_LIMIT))
-      if (overDepth) url.searchParams.set('depth', String(MAX_ANON_DEPTH))
-      return NextResponse.rewrite(url)
-    }
   }
 
   return NextResponse.next()

@@ -42,6 +42,7 @@ import { HeaderConfig } from './collections/globals/HeaderConfig'
 import { SiteConfig } from './collections/globals/SiteConfig'
 import { FaqSettings } from './collections/globals/FaqSettings'
 import { mediaStoragePlugins } from './lib/storage'
+import { withAnonymousGlobalReadCaps, withAnonymousReadCaps } from './lib/anonymous-read-caps'
 import { emailAdapter } from './lib/email'
 import { getDbSsl, getDbConnectionString } from './lib/db-ssl'
 import { poolTuning } from './lib/db-pool-tuning'
@@ -135,6 +136,8 @@ export default buildConfig({
       providers: ['/components/admin/CommandPalette#CommandPaletteProvider'],
     },
   },
+  // Every collection and global gets the anonymous limit/depth cap. See
+  // lib/anonymous-read-caps.ts for why it is enforced here, not in middleware.
   collections: [
     Users,
     Media,
@@ -167,8 +170,8 @@ export default buildConfig({
     VideoTestimonials,
     SocialPosts,
     InternalLinkSuggestions,
-  ],
-  globals: [HeaderConfig, SiteConfig, FaqSettings],
+  ].map(withAnonymousReadCaps),
+  globals: [HeaderConfig, SiteConfig, FaqSettings].map(withAnonymousGlobalReadCaps),
   editor: lexicalEditor(),
   email: emailAdapter,
   // Payload 3 sets SameSite=Lax by default on auth cookies (httpOnly JWT).
