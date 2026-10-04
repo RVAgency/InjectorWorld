@@ -19,8 +19,8 @@ import { s3Storage } from '@payloadcms/storage-s3'
  *   - region     = 'auto' (R2 has no real regions)
  *   - forcePathStyle = true (R2 prefers path-style addressing)
  *   - NO per-object ACL: R2 ignores S3 ACLs. Public access is granted on the
- *     bucket (the managed pub-xxxx.r2.dev URL, or a custom domain), so we never
- *     send acl: 'public-read'.
+ *     bucket (the managed pub-xxxx.r2.dev URL, or a custom domain), so we
+ *     never send acl: 'public-read' to R2.
  *   - The S3 endpoint is PRIVATE. Public file URLs must be built from the
  *     separate public domain (R2_PUBLIC_URL), which is what generateFileURL does.
  *
@@ -33,6 +33,14 @@ import { s3Storage } from '@payloadcms/storage-s3'
  * real regions and will reject 'auto' with a signature mismatch. Set R2_REGION
  * (e.g. 'nyc3') when pointing this at DO Spaces; it defaults to 'auto' so R2
  * keeps working unchanged with zero config.
+ *
+ * ACL: DO Spaces is the opposite of R2. An object uploaded without an ACL is
+ * PRIVATE there, and the public url returns 403 AccessDenied. Every media file
+ * is meant to be public (generateFileURL hands out the plain public url), so
+ * anything that is not R2 gets acl: 'public-read', which the plugin applies to
+ * the original and every generated size. This is what broke the first real
+ * admin upload (the temple-filler cover, 2026-10-03): the files landed in the
+ * right folder with the right DB rows, all private.
  */
 
 const bucket = process.env.R2_BUCKET
@@ -41,6 +49,7 @@ const accessKeyId = process.env.R2_ACCESS_KEY_ID
 const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY
 const publicUrl = process.env.R2_PUBLIC_URL
 const region = process.env.R2_REGION || 'auto'
+const isR2 = Boolean(endpoint?.includes('r2.cloudflarestorage.com'))
 
 /** True only when every credential needed to talk to R2 is set. */
 export const isRemoteStorageEnabled = Boolean(
@@ -78,6 +87,9 @@ export function mediaStoragePlugins(): Plugin[] {
         },
       },
       bucket: bucket!,
+      // Spaces stores an upload without an ACL as private (403 on the public
+      // url). R2 has no object ACLs, so it gets none.
+      acl: isR2 ? undefined : 'public-read',
       config: {
         endpoint,
         region,
