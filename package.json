@@ -28,11 +28,6 @@
     "seed:dummy-clinics": "tsx --env-file=.env.local scripts/seed-dummy-clinics.ts",
     "backfill:zip-locations": "tsx --env-file=.env.local scripts/backfill-zip-locations.ts",
     "drip:index": "tsx --env-file=.env.local scripts/drip-index.ts",
-    "fix:audit": "node --env-file=.env.local scripts/audit-data-pre-deploy.mjs",
-    "fix:zip": "node --env-file=.env.local scripts/fix-clinic-locations-from-zip.mjs",
-    "fix:names": "node --env-file=.env.local scripts/cleanup-bad-clinic-names.mjs",
-    "fix:seed": "node --env-file=.env.local scripts/delete-seed-providers.mjs",
-    "fix:ziplocts": "node --env-file=.env.local scripts/cleanup-zip-locations.mjs",
     "rollup:analytics": "tsx --env-file=.env.local scripts/rollup-analytics.ts"
   },
   "dependencies": {

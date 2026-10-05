@@ -7,10 +7,10 @@
  *
  * Usage:
  *   npm run import                                  # data/samples/*.sample.csv
- *   npm run import -- --dir ./data/fake             # clinics.csv / providers.csv / reviews.csv / photos.csv / qa.csv
- *   npm run import -- --dir ./data/fake --dry-run   # preview counts + alerts, write nothing
+ *   npm run import -- --dir ./data/batch            # clinics.csv / providers.csv / reviews.csv / photos.csv / qa.csv
+ *   npm run import -- --dir ./data/batch --dry-run  # preview counts + alerts, write nothing
  *   npm run import -- --combined ./data/all.csv      # one file with a record_type column
- *   npm run import -- --dir ./data/fake --batch=fake-2026-06
+ *   npm run import -- --dir ./data/batch --batch=batch-2026-10
  *
  * Safe to re-run: existing records are updated, not duplicated.
  */

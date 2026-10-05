@@ -38,7 +38,7 @@ export function GuideListingCard({
   /** 3 under a section <h2> (homepage), 2 on a listing page that only has an <h1>. */
   headingLevel?: 2 | 3
 }) {
-  // Real publish date when the guide has one. scripts/content-refresh-2026-07.ts
+  // Real publish date when the guide has one. The July 2026 content refresh
   // never set publishedAt, so live guides can have it empty; the review date is
   // the fallback rather than showing no date at all.
   const dateSource = guide.publishedAt ?? guide.lastMedicallyReviewed

@@ -5,7 +5,7 @@
  *   npx tsx --env-file=.env.local scripts/import-content.ts <file1.json> [file2.json] ...
  *
  * Example:
- *   npx tsx --env-file=.env.local scripts/import-content.ts data/news-january-2026.json
+ *   npx tsx --env-file=.env.local scripts/import-content.ts data/samples/news.sample.json
  */
 
 import { getPayload } from 'payload'

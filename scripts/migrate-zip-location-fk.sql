@@ -35,8 +35,8 @@ END $$;
 
 -- 3. Washington DC has no `state` Location row (locations only seeded the 50 states),
 --    so every DC clinic fails both the state-level and city-level match. Add it.
---    (scripts/fix-locations-prod.mjs's metro auto-create skips DC for exactly this
---    reason -- no parent state Location to attach to -- which is how this was found.)
+--    (The one-off production location repair skipped DC for exactly this reason --
+--    no parent state Location to attach to -- which is how this was found.)
 INSERT INTO "locations" ("name", "slug", "kind", "state", "is_live", "noindex", "provider_count", "sort_rank", "featured", "updated_at", "created_at")
 SELECT 'District of Columbia', 'district-of-columbia', 'state', 'DC', true, false, 0, 100, true, now(), now()
 WHERE NOT EXISTS (

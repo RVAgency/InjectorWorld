@@ -1,7 +1,8 @@
 ﻿/**
  * Phase 15: JSON content importer for news articles and guides.
  *
- * Accepts the injector_world_news_bulk_upload_template.json shape.
+ * Accepts the shape in data/samples/news.import-template.json (guides:
+ * data/samples/guides.import-template.json).
  * Validates, resolves relations, converts body to Lexical JSON,
  * maps structured fields, upserts by slug, raises DataAlerts for issues.
  * Never throws the whole batch on one bad row.
