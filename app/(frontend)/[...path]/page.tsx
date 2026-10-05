@@ -10,6 +10,7 @@ import {
 import { getActiveBanner } from '@/lib/promotions'
 import { getPageRobots } from '@/lib/page-index/queries'
 import { buildPageMetadata, withTitleSuffix, countWord, COMPARE_TAIL } from '@/lib/seo-metadata'
+import { webPageRef, pageItemList, clinicItemList, brandEntity } from '@/lib/json-ld'
 import { CityDirectoryPage } from '@/components/pages/CityDirectoryPage'
 import { ServicePillarPage } from '@/components/pages/ServicePillarPage'
 import { ServiceStatePage } from '@/components/pages/ServiceStatePage'
@@ -20,6 +21,12 @@ import { BrandStatePage } from '@/components/pages/BrandStatePage'
 import { BrandCityDirectoryPage } from '@/components/pages/BrandCityDirectoryPage'
 
 export const revalidate = 600
+
+/** One string for the service pillar's meta description and its MedicalWebPage
+ *  description, so the two can never drift apart. */
+function servicePillarDescription(name: string): string {
+  return `Find verified providers offering ${name} near you. ${COMPARE_TAIL}`
+}
 
 export async function generateStaticParams() {
   try {
@@ -118,7 +125,7 @@ export async function generateMetadata({
     const path = `/services/${resolved.serviceSlug}`
     return buildPageMetadata({
       title: withTitleSuffix(`${name} Injectors Near You`),
-      description: `Find verified providers offering ${name} near you. ${COMPARE_TAIL}`,
+      description: servicePillarDescription(name),
       url: `${siteUrl}${path}`,
       imageAlt: `${name} injectors near you`,
       robots: await getPageRobots(path),
@@ -175,6 +182,7 @@ export default async function CatchAllPage({
   if (resolved.type === 'brand-pillar') {
     const data = await getBrandPillar(resolved.brandSlug)
     if (!data) notFound()
+    const pageUrl = `${siteUrl}/brands/${resolved.brandSlug}`
     const schema = [{
       '@context': 'https://schema.org', '@type': 'BreadcrumbList',
       itemListElement: [
@@ -182,9 +190,16 @@ export default async function CatchAllPage({
         { '@type': 'ListItem', position: 2, name: 'Brands', item: `${siteUrl}/brands` },
         { '@type': 'ListItem', position: 3, name: data.brand.name },
       ],
-    }]
+    },
+    brandEntity(data.brand, pageUrl),
+    // The states in the hero's LocationPicker, the same list and order.
+    pageItemList(`${data.brand.name} Injectors by state`, pageUrl, data.states.map((s) => ({
+      name: `${data.brand.name} Injectors in ${s.name}`,
+      url: `${pageUrl}/${s.slug}`,
+    })))].filter((s): s is NonNullable<typeof s> => s !== null)
     // No FAQPage here: the FAQ block is a preview, and its schema lives on
-    // /faq/<category> only (docs/FAQ-SYSTEM-2026-09-13.md).
+    // /faq/<category> only (docs/FAQ-SYSTEM-2026-09-13.md). The SEO expert's
+    // 2026-10-05 spec asked for one; skipped by founder decision the same day.
     return <BrandPillarPage data={data} schema={schema} />
   }
 
@@ -200,7 +215,16 @@ export default async function CatchAllPage({
         { '@type': 'ListItem', position: 3, name: data.brand.name, item: `${siteUrl}/brands/${resolved.brandSlug}` },
         { '@type': 'ListItem', position: 4, name: data.state.name },
       ],
-    }]
+    },
+    // Every city in the picker and the city grid, same order.
+    pageItemList(
+      `${data.brand.name} Injectors by city in ${data.state.name}`,
+      `${siteUrl}/brands/${resolved.brandSlug}/${resolved.stateSlug}`,
+      data.cities.map((c) => ({
+        name: `${data.brand.name} Injectors in ${c.name}, ${data.state.name}`,
+        url: `${siteUrl}/brands/${resolved.brandSlug}/${resolved.stateSlug}/${c.slug}`,
+      })),
+    )].filter((s): s is NonNullable<typeof s> => s !== null)
     return <BrandStatePage data={data} schema={schema} />
   }
 
@@ -218,7 +242,14 @@ export default async function CatchAllPage({
         ...(data.stateLocation ? [{ '@type': 'ListItem', position: 4, name: data.stateLocation.name, item: `${siteUrl}/brands/${resolved.brandSlug}/${resolved.stateSlug}` }] : []),
         { '@type': 'ListItem', position: data.stateLocation ? 5 : 4, name: cityDisplay },
       ],
-    }]
+    },
+    // The page-1 clinic grid as served (founder decision 2026-10-05).
+    clinicItemList(
+      `${data.brand.name} clinics in ${cityDisplay}${data.stateLocation ? `, ${data.stateLocation.name}` : ''}`,
+      `${siteUrl}/brands/${resolved.brandSlug}/${resolved.stateSlug}/${resolved.citySlug}`,
+      siteUrl,
+      data.clinics,
+    )].filter((s): s is NonNullable<typeof s> => s !== null)
     return <BrandCityDirectoryPage data={data} schema={schema} />
   }
 
@@ -268,15 +299,15 @@ export default async function CatchAllPage({
       ],
     }
 
-    const clinicListSchema = data.clinics.length > 0 ? {
-      '@context': 'https://schema.org', '@type': 'ItemList',
-      name: `${data.service.name} clinics in ${cityDisplay}`,
-      numberOfItems: data.clinics.length,
-      itemListElement: data.clinics.slice(0, 10).map((c, i) => ({
-        '@type': 'ListItem', position: i + 1,
-        item: { '@type': 'MedicalBusiness', name: c.clinicName, url: `${siteUrl}/clinics/${c.stateSlug}/${c.citySlug}/${c.slug}` },
-      })),
-    } : null
+    // The page-1 clinic grid as served (founder decision 2026-10-05). Was the
+    // first 10 rows while numberOfItems counted all of page 1, so the list and
+    // its own count disagreed.
+    const clinicListSchema = clinicItemList(
+      `${data.service.name} clinics in ${cityDisplay}${data.stateLocation ? `, ${data.stateLocation.name}` : ''}`,
+      `${siteUrl}/services/${resolved.serviceSlug}/${resolved.stateSlug}/${resolved.citySlug}`,
+      siteUrl,
+      data.clinics,
+    )
 
     return (
       <CityDirectoryPage
@@ -294,11 +325,15 @@ export default async function CatchAllPage({
 
     const banner = await getActiveBanner('service', data.service.id, undefined, undefined)
 
+    const pageUrl = `${siteUrl}/services/${resolved.serviceSlug}`
     const schema = [{
       '@context': 'https://schema.org', '@type': 'MedicalWebPage',
       name: `${data.service.name} Injectors`,
-      description: data.service.shortDescription || data.service.tagline,
-      url: `${siteUrl}/services/${resolved.serviceSlug}`,
+      url: pageUrl,
+      mainEntityOfPage: webPageRef(pageUrl),
+      // The page's own meta description. Was shortDescription || tagline, which
+      // left the key out entirely on services with neither (e.g. /services/abdomen).
+      description: servicePillarDescription(data.service.name),
       specialty: 'Dermatology',
     }, {
       // Added 2026-09-24: the service pillar was the one level of the three
@@ -310,7 +345,12 @@ export default async function CatchAllPage({
         { '@type': 'ListItem', position: 2, name: 'Services', item: `${siteUrl}/services` },
         { '@type': 'ListItem', position: 3, name: data.service.name },
       ],
-    }]
+    },
+    // The states in the hero's LocationPicker, the same list and order.
+    pageItemList(`${data.service.name} Injectors by state`, pageUrl, data.states.map((s) => ({
+      name: `${data.service.name} Injectors in ${s.name}`,
+      url: `${pageUrl}/${s.slug}`,
+    })))].filter((s): s is NonNullable<typeof s> => s !== null)
 
     return <ServicePillarPage data={data} banner={banner} schema={schema} />
   }
@@ -332,14 +372,17 @@ export default async function CatchAllPage({
         { '@type': 'ListItem', position: 3, name: data.service.name, item: `${siteUrl}/services/${resolved.serviceSlug}` },
         { '@type': 'ListItem', position: 4, name: data.state.name },
       ],
-    }, {
-      '@context': 'https://schema.org', '@type': 'ItemList',
-      name: `${data.service.name} providers in ${data.state.name}`,
-      itemListElement: data.cities.map((c, i) => ({
-        '@type': 'ListItem', position: i + 1,
-        item: { '@type': 'City', name: c.name, url: `${siteUrl}/services/${resolved.serviceSlug}/${resolved.stateSlug}/${c.slug}` },
+    },
+    // Every city in the picker and the city grid, same order. Items are the
+    // city pages, so WebPage, not City (a City entity has no page url of ours).
+    pageItemList(
+      `${data.service.name} Injectors by city in ${data.state.name}`,
+      `${siteUrl}/services/${resolved.serviceSlug}/${resolved.stateSlug}`,
+      data.cities.map((c) => ({
+        name: `${data.service.name} Injectors in ${c.name}, ${data.state.name}`,
+        url: `${siteUrl}/services/${resolved.serviceSlug}/${resolved.stateSlug}/${c.slug}`,
       })),
-    }]
+    )].filter((s): s is NonNullable<typeof s> => s !== null)
 
     return <ServiceStatePage data={data} banner={banner} schema={schema} />
   }

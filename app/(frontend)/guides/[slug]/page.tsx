@@ -17,6 +17,7 @@ import { TableOfContents } from '@/components/shared/TableOfContents'
 import { getEntityRobots } from '@/lib/page-index/queries'
 import { resolveGuideDates, formatGuideDate } from '@/lib/guide-dates'
 import { buildPageMetadata } from '@/lib/seo-metadata'
+import { webPageRef, articleAuthor } from '@/lib/json-ld'
 
 export const revalidate = 300
 
@@ -117,18 +118,18 @@ export default async function GuideDetailPage({
         }
       : {}),
     url: `${siteUrl}/guides/${guide.slug}`,
+    mainEntityOfPage: webPageRef(`${siteUrl}/guides/${guide.slug}`),
     ...(dates.published ? { datePublished: dates.published } : {}),
     ...(dates.modified ? { dateModified: dates.modified } : {}),
-    author: {
-      '@type': 'Person',
-      name: guide.author.fullName,
-      ...(guide.author.linkedinUrl ? { url: guide.author.linkedinUrl } : {}),
-    },
+    // Organization for the house byline, Person for a named author (SEO expert
+    // spec 2026-10-05: Person + EEAT once real authors are assigned).
+    author: articleAuthor(guide.author, siteUrl),
     publisher: {
       '@type': 'Organization',
       name: 'injector.world',
       url: siteUrl,
     },
+    articleSection: 'Guides',
     ...(guide.medicalReviewer
       ? {
           reviewedBy: {

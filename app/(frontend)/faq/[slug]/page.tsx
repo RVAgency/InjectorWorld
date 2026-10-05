@@ -8,6 +8,7 @@ import { FaqAccordionItem } from '@/components/shared/FaqAccordionItem'
 import { FaqHashOpener } from '@/components/faq/FaqHashOpener'
 import { getFaqCategoryPage, getFaqHub } from '@/lib/faqs/queries'
 import { getPageRobots } from '@/lib/page-index/queries'
+import { webPageRef } from '@/lib/json-ld'
 
 /**
  * /faq/<slug>: the home of every FAQ in one category, grouped by section.
@@ -69,6 +70,15 @@ export default async function FaqCategoryPage({ params }: { params: Promise<{ sl
         { '@type': 'ListItem', position: 2, name: 'FAQ', item: `${siteUrl}/faq` },
         { '@type': 'ListItem', position: 3, name: category.name },
       ],
+    },
+    {
+      // Added 2026-10-05 per the SEO expert's spec. Sits alongside the FAQPage
+      // below, it does not replace it.
+      '@context': 'https://schema.org',
+      '@type': 'MedicalWebPage',
+      name: `${category.name} FAQs`,
+      url,
+      mainEntityOfPage: webPageRef(url),
     },
   ]
   if (settings.schemaEnabled) {

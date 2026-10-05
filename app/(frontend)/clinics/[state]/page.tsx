@@ -5,6 +5,7 @@ import { getStateHub } from '@/lib/location-queries'
 import { getActiveBanner } from '@/lib/promotions'
 import { isMarketLive } from '@/lib/markets'
 import { getPageRobots } from '@/lib/page-index/queries'
+import { pageItemList } from '@/lib/json-ld'
 import {
   buildPageMetadata,
   withTitleSuffix,
@@ -110,7 +111,16 @@ export default async function ClinicsStatePage({
       { '@type': 'ListItem', position: 2, name: 'Clinics', item: `${siteUrl}/clinics` },
       { '@type': 'ListItem', position: 3, name: data.state.name },
     ],
-  }]
+  },
+  // Every city in the picker and the "Cities in <state>" grid, same order.
+  pageItemList(
+    `Clinics in ${data.state.name}`,
+    `${siteUrl}/clinics/${data.state.slug}`,
+    data.allCities.map((c) => ({
+      name: `Clinics in ${c.name}, ${data.state.name}`,
+      url: `${siteUrl}/clinics/${data.state.slug}/${c.slug}`,
+    })),
+  )].filter((s): s is NonNullable<typeof s> => s !== null)
   // No FAQPage: FAQ schema lives on /faq/<category> only (docs/FAQ-SYSTEM-2026-09-13.md).
 
   return (

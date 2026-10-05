@@ -25,6 +25,7 @@ import {
 } from '@/lib/clinic-queries'
 import { getEntityRobots } from '@/lib/page-index/queries'
 import { buildPageMetadata, withTitleSuffix } from '@/lib/seo-metadata'
+import { webPageRef } from '@/lib/json-ld'
 import { formatPhoneDisplay, toTelHref } from '@/lib/format-phone'
 import { ClinicHoursBar } from '@/components/clinics/ClinicHoursBar'
 import { ClinicCoverPhoto } from '@/components/clinics/ClinicCoverPhoto'
@@ -894,6 +895,7 @@ function buildSchema(clinic: ClinicDetail, canonicalUrl: string, faqs: ClinicFaq
     description: clinic.description || clinic.tagline,
     image: clinic.photoUrls,
     url: canonicalUrl,
+    mainEntityOfPage: webPageRef(canonicalUrl),
     telephone: formatPhoneDisplay(clinic.phone) ?? clinic.phone,
     email: clinic.email,
     address: {

@@ -10,6 +10,7 @@ import { AtAGlanceList } from '@/components/shared/AtAGlanceList'
 import { TableOfContents } from '@/components/shared/TableOfContents'
 import { getEntityRobots } from '@/lib/page-index/queries'
 import { buildPageMetadata } from '@/lib/seo-metadata'
+import { webPageRef, articleAuthor } from '@/lib/json-ld'
 
 export const revalidate = 300
 
@@ -100,6 +101,7 @@ export default async function NewsDetailPage({
     description: article.excerpt,
     ...(article.coverImageUrl ? { image: article.coverImageUrl } : {}),
     url: `${siteUrl}/news/${article.slug}`,
+    mainEntityOfPage: webPageRef(`${siteUrl}/news/${article.slug}`),
     ...(article.publishedAt ? { datePublished: article.publishedAt } : {}),
     // Real last-modified first: it bumps on every content change (including an
     // approved internal-link insertion), which is the freshness signal.
@@ -107,20 +109,20 @@ export default async function NewsDetailPage({
     ...(article.updatedAt || article.publishedAt
       ? { dateModified: article.updatedAt || article.publishedAt }
       : {}),
-    author: {
-      '@type': 'Person',
-      name: article.author.fullName,
-      ...(article.author.linkedinUrl ? { url: article.author.linkedinUrl } : {}),
-    },
+    // Organization for the house byline, Person for a named author (SEO expert
+    // spec 2026-10-05: Person + EEAT once real authors are assigned).
+    author: articleAuthor(article.author, siteUrl),
     publisher: {
       '@type': 'Organization',
       name: 'injector.world',
       url: siteUrl,
       logo: {
         '@type': 'ImageObject',
-        url: `${siteUrl}/logo.png`,
+        // Was /logo.png, a file that has never existed in public/ (404).
+        url: `${siteUrl}/wordmark.png`,
       },
     },
+    articleSection: 'News',
     ...(article.medicalReviewer
       ? {
           reviewedBy: {

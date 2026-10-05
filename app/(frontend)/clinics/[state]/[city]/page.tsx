@@ -4,6 +4,7 @@ import { isCitySlug, getLocationPrerenderParams } from '@/lib/route-resolver'
 import { getCityHub } from '@/lib/location-queries'
 import { isMarketLive } from '@/lib/markets'
 import { getPageRobots } from '@/lib/page-index/queries'
+import { clinicItemList } from '@/lib/json-ld'
 import {
   buildPageMetadata,
   withTitleSuffix,
@@ -109,7 +110,15 @@ export default async function ClinicsCityPage({
       ...(data.stateLocation ? [{ '@type': 'ListItem', position: 3, name: data.stateLocation.name, item: `${siteUrl}/clinics/${data.stateLocation.slug}` }] : []),
       { '@type': 'ListItem', position: data.stateLocation ? 4 : 3, name: data.city.name },
     ],
-  }]
+  },
+  // The page-1 clinic grid as served (founder decision 2026-10-05), not the
+  // full "All clinics in <city>" link list, which runs to hundreds.
+  clinicItemList(
+    `Clinics in ${data.city.name.replace(/\s+city$/i, '')}${data.stateLocation ? `, ${data.stateLocation.name}` : ''}`,
+    `${siteUrl}/clinics/${state}/${city}`,
+    siteUrl,
+    data.clinics,
+  )].filter((s): s is NonNullable<typeof s> => s !== null)
 
   return (
     <>
